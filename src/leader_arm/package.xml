@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>leader_arm</name>
+  <version>0.0.0</version>
+  <description>Leader Arm teleop / servo reader for ROS2</description>
+
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>MIT</license>
+
+  <!-- 构建工具 -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 运行依赖 -->
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+
+  <!-- 串口：rosdep key，一般是python3-serial -->
+  <exec_depend>python3-serial</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

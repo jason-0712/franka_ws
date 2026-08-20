@@ -1,0 +1,42 @@
+services:
+  franka_ros2:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    #   args:
+    #     - USER_UID=${USER_UID}
+    #     - USER_GID=${USER_GID}
+    image: realsense_ros2:latest   # ❗ 使用 commit 的镜像
+    container_name: realsense_ros2
+    network_mode: "host"
+    privileged: true
+    
+    working_dir: /camera_ws
+    tty: true
+    stdin_open: true
+    volumes:
+      - ../camera_driver:/camera_ws/src
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ./limits.conf:/etc/security/limits.conf
+      - /dev:/dev
+    environment:
+      QT_X11_NO_MITSHM: 1
+      DISPLAY: $DISPLAY
+      ROS_DOMAIN_ID: 30
+      RCUTILS_COLORIZED_OUTPUT: 1
+      SHELL: /bin/bash
+      CAMERA_NAME: camera
+      CAMERA_NAMESPACE: camera
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+      rttime: -1
+      memlock: 8428281856
+    command: >
+      bash -c "export ROS_DOMAIN_ID=30 &&
+              source /opt/ros/humble/setup.bash &&
+              ros2 launch realsense2_camera rs_launch.py camera_name:=right_third_person_camera camera_namespace:=right
+              color_width:=640 color_height:=480 color_fps:=30
+              enable_depth:=false enable_infra1:=false enable_infra2:=false enable_gyro:=false enable_accel:=false
+      "

@@ -1,0 +1,403 @@
+diff --git a/quest_mr_passthrough_native/app/build.gradle b/quest_mr_passthrough_native/app/build.gradle
+index e82e65a..df92bad 100644
+--- a/quest_mr_passthrough_native/app/build.gradle
++++ b/quest_mr_passthrough_native/app/build.gradle
+@@ -10,8 +10,8 @@ android {
+         applicationId "com.rail.oculus.teleop"
+         minSdk 29
+         targetSdk 35
+-        versionCode 1
+-        versionName "0.2.0"
++        versionCode 2
++        versionName "0.2.1"
+ 
+         ndk {
+             abiFilters "arm64-v8a"
+diff --git a/quest_mr_passthrough_native/app/src/main/cpp/CMakeLists.txt b/quest_mr_passthrough_native/app/src/main/cpp/CMakeLists.txt
+index f72d1c0..a954a51 100644
+--- a/quest_mr_passthrough_native/app/src/main/cpp/CMakeLists.txt
++++ b/quest_mr_passthrough_native/app/src/main/cpp/CMakeLists.txt
+@@ -27,6 +27,10 @@ target_compile_definitions(piper_openxr_teleop PRIVATE
+ target_include_directories(piper_openxr_teleop PRIVATE
+     ${CMAKE_CURRENT_SOURCE_DIR})
+ 
++target_compile_options(piper_openxr_teleop PRIVATE
++    -Wno-error=missing-field-initializers
++    -Wno-error=deprecated-declarations)
++
+ target_link_libraries(piper_openxr_teleop PRIVATE
+     OpenXR::openxr_loader
+     native_app_glue
+diff --git a/quest_mr_passthrough_native/app/src/main/cpp/logcat_publisher.cpp b/quest_mr_passthrough_native/app/src/main/cpp/logcat_publisher.cpp
+index 0a5261e..fe2f1a5 100644
+--- a/quest_mr_passthrough_native/app/src/main/cpp/logcat_publisher.cpp
++++ b/quest_mr_passthrough_native/app/src/main/cpp/logcat_publisher.cpp
+@@ -21,10 +21,6 @@ void AppendMatrix(std::ostringstream& out, const std::array<float, 16>& matrix)
+     }
+ }
+ 
+-const char* BoolToken(bool value) {
+-    return value ? "True" : "False";
+-}
+-
+ }  // namespace
+ 
+ void LogStatus(const char* message) {
+@@ -32,27 +28,42 @@ void LogStatus(const char* message) {
+ }
+ 
+ void PublishTrackingSample(const TrackingSample& sample) {
+-    if (!sample.left.valid || !sample.right.valid || !sample.hmdValid) {
++    if (!sample.right.valid || !sample.hmdValid) {
+         return;
+     }
+ 
+     std::ostringstream out;
+     out << "right:";
+     AppendMatrix(out, sample.right.matrix);
+-    out << "|left:";
+-    AppendMatrix(out, sample.left.matrix);
++    if (sample.left.valid) {
++        out << "|left:";
++        AppendMatrix(out, sample.left.matrix);
++    }
+     out << "|hmd:";
+     AppendMatrix(out, sample.hmd);
+-    out << "&A:" << BoolToken(sample.a)
+-        << "|B:" << BoolToken(sample.b)
+-        << "|X:" << BoolToken(sample.x)
+-        << "|Y:" << BoolToken(sample.y)
+-        << "|leftGrip:" << sample.left.grip
+-        << "|rightGrip:" << sample.right.grip
+-        << "|leftTrig:" << sample.left.trigger
+-        << "|rightTrig:" << sample.right.trigger
+-        << "|leftJS:" << sample.left.jsX << ' ' << sample.left.jsY
+-        << "|rightJS:" << sample.right.jsX << ' ' << sample.right.jsY;
++    out << "&R";
++    if (sample.a) {
++        out << ",A";
++    }
++    if (sample.b) {
++        out << ",B";
++    }
++    out << ",rightGrip " << sample.right.grip
++        << ",rightTrig " << sample.right.trigger
++        << ",rightJS " << sample.right.jsX << ' ' << sample.right.jsY;
++
++    if (sample.left.valid) {
++        out << ",L";
++        if (sample.x) {
++            out << ",X";
++        }
++        if (sample.y) {
++            out << ",Y";
++        }
++        out << ",leftGrip " << sample.left.grip
++            << ",leftTrig " << sample.left.trigger
++            << ",leftJS " << sample.left.jsX << ' ' << sample.left.jsY;
++    }
+ 
+     __android_log_print(ANDROID_LOG_INFO, kTag, "%s", out.str().c_str());
+ }
+diff --git a/quest_mr_passthrough_native/app/src/main/cpp/openxr_app.cpp b/quest_mr_passthrough_native/app/src/main/cpp/openxr_app.cpp
+index 1c8ca3d..63dc689 100644
+--- a/quest_mr_passthrough_native/app/src/main/cpp/openxr_app.cpp
++++ b/quest_mr_passthrough_native/app/src/main/cpp/openxr_app.cpp
+@@ -33,7 +33,6 @@ bool OpenXrApp::Initialize() {
+     if (!input_.Initialize(instance_, session_, appSpace_)) {
+         return false;
+     }
+-    passthrough_.Initialize(instance_, session_, passthroughAvailable_);
+     initialized_ = true;
+     LogStatus("PIPER MR TELEOP native OpenXR initialized");
+     return true;
+@@ -249,6 +248,9 @@ void OpenXrApp::BeginSession() {
+     if (XR_SUCCEEDED(xrBeginSession(session_, &beginInfo))) {
+         sessionRunning_ = true;
+         LogStatus("OpenXR session: running");
++        if (!passthrough_.IsRunning()) {
++            passthrough_.Initialize(instance_, session_, passthroughAvailable_);
++        }
+     }
+ }
+ 
+@@ -303,6 +305,11 @@ void OpenXrApp::RenderFrame() {
+     XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
+     xrBeginFrame(session_, &beginInfo);
+ 
++    if (!passthrough_.IsRunning() && (passthroughRetryFrame_++ % 60) == 0) {
++        LogStatus("Passthrough: retry from render loop");
++        passthrough_.Initialize(instance_, session_, passthroughAvailable_);
++    }
++
+     TrackingSample sample;
+     LocateHmd(frameState.predictedDisplayTime, &sample);
+     input_.Poll(frameState.predictedDisplayTime, &sample);
+diff --git a/quest_mr_passthrough_native/app/src/main/cpp/openxr_app.hpp b/quest_mr_passthrough_native/app/src/main/cpp/openxr_app.hpp
+index ffd3fb9..0d5eb24 100644
+--- a/quest_mr_passthrough_native/app/src/main/cpp/openxr_app.hpp
++++ b/quest_mr_passthrough_native/app/src/main/cpp/openxr_app.hpp
+@@ -29,6 +29,7 @@ private:
+     bool exitRequested_ = false;
+     bool passthroughAvailable_ = false;
+     bool initialized_ = false;
++    int passthroughRetryFrame_ = 0;
+ 
+     EGLDisplay eglDisplay_ = EGL_NO_DISPLAY;
+     EGLConfig eglConfig_ = nullptr;
+diff --git a/quest_mr_passthrough_native/app/src/main/cpp/passthrough_fb.cpp b/quest_mr_passthrough_native/app/src/main/cpp/passthrough_fb.cpp
+index 1e796af..3697593 100644
+--- a/quest_mr_passthrough_native/app/src/main/cpp/passthrough_fb.cpp
++++ b/quest_mr_passthrough_native/app/src/main/cpp/passthrough_fb.cpp
+@@ -2,9 +2,24 @@
+ 
+ #include "logcat_publisher.hpp"
+ 
++#include <cstdio>
++
+ namespace piper {
+ 
++namespace {
++
++constexpr XrResult kUnexpectedStatePassthroughFb = static_cast<XrResult>(-1000118000);
++
++void LogXrFailure(const char* operation, XrResult result) {
++    char buffer[128];
++    std::snprintf(buffer, sizeof(buffer), "%s failed: XrResult %d", operation, result);
++    LogStatus(buffer);
++}
++
++}  // namespace
++
+ bool PassthroughFB::Initialize(XrInstance instance, XrSession session, bool extensionAvailable) {
++    Shutdown();
+     instance_ = instance;
+     session_ = session;
+     available_ = extensionAvailable;
+@@ -37,28 +52,41 @@ bool PassthroughFB::Initialize(XrInstance instance, XrSession session, bool exte
+         return false;
+     }
+ 
++    LogStatus("Passthrough: initializing");
+     XrPassthroughCreateInfoFB passthroughInfo{XR_TYPE_PASSTHROUGH_CREATE_INFO_FB};
+-    passthroughInfo.flags = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB;
+-    if (XR_FAILED(xrCreatePassthroughFB_(session_, &passthroughInfo, &passthrough_))) {
+-        LogStatus("xrCreatePassthroughFB failed");
++    passthroughInfo.flags = 0;
++    XrResult result = xrCreatePassthroughFB_(session_, &passthroughInfo, &passthrough_);
++    if (XR_FAILED(result)) {
++        LogXrFailure("xrCreatePassthroughFB", result);
++        Shutdown();
+         return false;
+     }
+ 
+-    if (XR_FAILED(xrPassthroughStartFB_(passthrough_))) {
+-        LogStatus("xrPassthroughStartFB failed");
++    result = xrPassthroughStartFB_(passthrough_);
++    if (result == kUnexpectedStatePassthroughFb) {
++        LogStatus("xrPassthroughStartFB reported unexpected state; continuing");
++    } else if (XR_FAILED(result)) {
++        LogXrFailure("xrPassthroughStartFB", result);
++        Shutdown();
+         return false;
+     }
+ 
+     XrPassthroughLayerCreateInfoFB layerInfo{XR_TYPE_PASSTHROUGH_LAYER_CREATE_INFO_FB};
+     layerInfo.passthrough = passthrough_;
+     layerInfo.purpose = XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB;
+-    if (XR_FAILED(xrCreatePassthroughLayerFB_(session_, &layerInfo, &layer_))) {
+-        LogStatus("xrCreatePassthroughLayerFB failed");
++    result = xrCreatePassthroughLayerFB_(session_, &layerInfo, &layer_);
++    if (XR_FAILED(result)) {
++        LogXrFailure("xrCreatePassthroughLayerFB", result);
++        Shutdown();
+         return false;
+     }
+ 
+-    if (XR_FAILED(xrPassthroughLayerResumeFB_(layer_))) {
+-        LogStatus("xrPassthroughLayerResumeFB failed");
++    result = xrPassthroughLayerResumeFB_(layer_);
++    if (result == kUnexpectedStatePassthroughFb) {
++        LogStatus("xrPassthroughLayerResumeFB reported unexpected state; continuing");
++    } else if (XR_FAILED(result)) {
++        LogXrFailure("xrPassthroughLayerResumeFB", result);
++        Shutdown();
+         return false;
+     }
+ 
+diff --git a/scripts/quest_reader_ros_bridge.py b/scripts/quest_reader_ros_bridge.py
+new file mode 100644
+index 0000000..4690f02
+--- /dev/null
++++ b/scripts/quest_reader_ros_bridge.py
+@@ -0,0 +1,170 @@
++#!/usr/bin/env python3
++"""Publish Piper VR QuestReader samples as ROS 2 PoseStamped and Joy topics."""
++
++from __future__ import annotations
++
++import argparse
++import math
++import sys
++from pathlib import Path
++
++import numpy as np
++import rclpy
++from geometry_msgs.msg import PoseStamped
++from rclpy.node import Node
++from sensor_msgs.msg import Joy
++
++
++def rotation_matrix_to_quaternion(matrix: np.ndarray) -> tuple[float, float, float, float]:
++    """Convert a 3x3 rotation matrix to xyzw quaternion."""
++    m00, m01, m02 = matrix[0, 0], matrix[0, 1], matrix[0, 2]
++    m10, m11, m12 = matrix[1, 0], matrix[1, 1], matrix[1, 2]
++    m20, m21, m22 = matrix[2, 0], matrix[2, 1], matrix[2, 2]
++    trace = m00 + m11 + m22
++
++    if trace > 0.0:
++        s = math.sqrt(trace + 1.0) * 2.0
++        qw = 0.25 * s
++        qx = (m21 - m12) / s
++        qy = (m02 - m20) / s
++        qz = (m10 - m01) / s
++    elif m00 > m11 and m00 > m22:
++        s = math.sqrt(1.0 + m00 - m11 - m22) * 2.0
++        qw = (m21 - m12) / s
++        qx = 0.25 * s
++        qy = (m01 + m10) / s
++        qz = (m02 + m20) / s
++    elif m11 > m22:
++        s = math.sqrt(1.0 + m11 - m00 - m22) * 2.0
++        qw = (m02 - m20) / s
++        qx = (m01 + m10) / s
++        qy = 0.25 * s
++        qz = (m12 + m21) / s
++    else:
++        s = math.sqrt(1.0 + m22 - m00 - m11) * 2.0
++        qw = (m10 - m01) / s
++        qx = (m02 + m20) / s
++        qy = (m12 + m21) / s
++        qz = 0.25 * s
++
++    return qx, qy, qz, qw
++
++
++def analog(buttons: dict, key: str) -> float:
++    """Read a normalized Piper VR analog button value."""
++    value = buttons.get(key, (0.0,))
++    if isinstance(value, (tuple, list)) and value:
++        return float(value[0])
++    if isinstance(value, (bool, int, float)):
++        return float(value)
++    return 0.0
++
++
++class QuestReaderRosBridge(Node):
++    """Bridge QuestReader samples to generic ROS 2 controller topics."""
++
++    def __init__(self, args: argparse.Namespace) -> None:
++        super().__init__("quest_reader_ros_bridge")
++
++        repo = Path(args.piper_repo).expanduser().resolve()
++        if str(repo) not in sys.path:
++            sys.path.insert(0, str(repo))
++
++        from piper_vr.quest_reader import QuestReader
++
++        self.side = args.side
++        self.frame_id = args.frame_id
++        self.grip_threshold = args.grip_threshold
++        self.trigger_threshold = args.trigger_threshold
++        self.reader = QuestReader(
++            transport=args.transport,
++            connection=args.connection,
++            ip_address=args.quest_ip,
++            simulate_on_missing=args.simulate,
++        )
++
++        self.pose_pub = self.create_publisher(PoseStamped, args.pose_topic, 10)
++        self.joy_pub = self.create_publisher(Joy, args.joy_topic, 10)
++        self.create_timer(1.0 / args.hz, self.publish_latest)
++
++        self.get_logger().info(f"Reading Quest samples from {repo}")
++        self.get_logger().info(f"Publishing PoseStamped on {args.pose_topic}")
++        self.get_logger().info(f"Publishing Joy on {args.joy_topic}")
++
++    def publish_latest(self) -> None:
++        sample = self.reader.get_sample()
++        if sample is None:
++            return
++
++        transform = sample.transforms_openxr.get(self.side)
++        if transform is None:
++            return
++
++        transform = np.asarray(transform, dtype=float)
++        stamp = self.get_clock().now().to_msg()
++
++        pose_msg = PoseStamped()
++        pose_msg.header.stamp = stamp
++        pose_msg.header.frame_id = self.frame_id
++        pose_msg.pose.position.x = float(transform[0, 3])
++        pose_msg.pose.position.y = float(transform[1, 3])
++        pose_msg.pose.position.z = float(transform[2, 3])
++        qx, qy, qz, qw = rotation_matrix_to_quaternion(transform[:3, :3])
++        pose_msg.pose.orientation.x = qx
++        pose_msg.pose.orientation.y = qy
++        pose_msg.pose.orientation.z = qz
++        pose_msg.pose.orientation.w = qw
++        self.pose_pub.publish(pose_msg)
++
++        buttons = sample.buttons
++        right_grip = analog(buttons, "rightGrip")
++        right_trigger = analog(buttons, "rightTrig")
++
++        joy_msg = Joy()
++        joy_msg.header.stamp = stamp
++        joy_msg.header.frame_id = self.frame_id
++        joy_msg.buttons = [
++            int(bool(buttons.get("A", False))),
++            int(bool(buttons.get("B", False))),
++            int(bool(buttons.get("X", False))),
++            int(bool(buttons.get("Y", False))),
++            int(right_grip >= self.grip_threshold),
++            int(bool(buttons.get("RJ", False))),
++            int(right_trigger >= self.trigger_threshold),
++        ]
++        joy_msg.axes = [0.0] * 6
++        joy_msg.axes[5] = -1.0 if right_trigger >= self.trigger_threshold else 1.0
++        self.joy_pub.publish(joy_msg)
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--piper-repo", default="/home/ros/ros2_ws/src/piper-vr-teleop")
++    parser.add_argument("--transport", default="adb_logcat")
++    parser.add_argument("--connection", default="usb", choices=("usb", "wireless"))
++    parser.add_argument("--quest-ip")
++    parser.add_argument("--side", default="right", choices=("right", "left"))
++    parser.add_argument("--pose-topic", default="/quest/right_controller/pose")
++    parser.add_argument("--joy-topic", default="/quest/right_controller/joy")
++    parser.add_argument("--frame-id", default="quest_openxr")
++    parser.add_argument("--hz", "--rate", dest="hz", type=float, default=30.0)
++    parser.add_argument("--grip-threshold", type=float, default=0.5)
++    parser.add_argument("--trigger-threshold", type=float, default=0.5)
++    parser.add_argument("--simulate", action="store_true")
++    return parser.parse_args()
++
++
++def main() -> int:
++    rclpy.init()
++    node = QuestReaderRosBridge(parse_args())
++    try:
++        rclpy.spin(node)
++    finally:
++        node.reader.stop()
++        node.destroy_node()
++        rclpy.shutdown()
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())

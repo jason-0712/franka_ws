@@ -1,0 +1,54 @@
+{
+  "state": {
+    "eef_position": {
+      "start": 0,
+      "end": 3,
+      "original_key": "observation.state.cartesian"
+    },
+    "eef_rotation": {
+      "start": 3,
+      "end": 6,
+      "original_key": "observation.state.cartesian",
+      "rotation_type": "euler_angles_rpy"
+    },
+    "gripper": {
+      "start": 6,
+      "end": 7,
+      "original_key": "observation.state"
+    }
+  },
+  "action": {
+    "delta_eef_position": {
+      "start": 0,
+      "end": 3,
+      "original_key": "action",
+      "absolute": false
+    },
+    "delta_eef_rotation": {
+      "start": 3,
+      "end": 6,
+      "original_key": "action",
+      "absolute": false,
+      "rotation_type": "euler_angles_rpy"
+    },
+    "gripper": {
+      "start": 6,
+      "end": 7,
+      "original_key": "action",
+      "absolute": true
+    }
+  },
+  "video": {
+    "primary_image": {
+      "original_key": "observation.images.primary"
+    },
+    "wrist_image": {
+      "original_key": "observation.images.wrist"
+    }
+  },
+  "annotation": {
+    "human.action.task_description": {
+      "original_key": "task_index"
+    }
+  }
+}

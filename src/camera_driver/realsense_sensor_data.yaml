@@ -1,0 +1,3 @@
+# Keep high-bandwidth image delivery non-blocking.  The recorder's image
+# subscribers use ROS 2's sensor-data QoS profile as well.
+color_qos: SENSOR_DATA

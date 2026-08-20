@@ -1,0 +1,2915 @@
+diff --git a/crisp_gym/config/envs/no_cam_franka.yaml b/crisp_gym/config/envs/no_cam_franka.yaml
+index dd8b66f..c8dc0a5 100644
+--- a/crisp_gym/config/envs/no_cam_franka.yaml
++++ b/crisp_gym/config/envs/no_cam_franka.yaml
+@@ -8,10 +8,11 @@ joint_control_param_config: null
+ 
+ robot_config:
+   robot_type: "franka"
++  time_to_home: 2.0
+ 
+ gripper_config:
+   min_value: 0
+   max_value: 1
+ 
+ camera_configs: []
+-sensor_configs: []
+\ No newline at end of file
++sensor_configs: []
+diff --git a/crisp_gym/config/envs/only_wrist_cam_franka.yaml b/crisp_gym/config/envs/only_wrist_cam_franka.yaml
+index 438fff6..c5e3dd6 100644
+--- a/crisp_gym/config/envs/only_wrist_cam_franka.yaml
++++ b/crisp_gym/config/envs/only_wrist_cam_franka.yaml
+@@ -7,6 +7,7 @@ joint_control_param_config: null
+ 
+ robot_config:
+   robot_type: "franka"
++  time_to_home: 2.0
+ 
+ gripper_config:
+   min_value: 0
+@@ -23,4 +24,4 @@ camera_configs:
+     camera_color_image_topic: "camera/wrist_camera/color/image_rect_raw"
+     camera_color_info_topic: "camera/wrist_camera/color/camera_info"
+ 
+-sensor_configs: []
+\ No newline at end of file
++sensor_configs: []
+diff --git a/crisp_gym/config/home.py b/crisp_gym/config/home.py
+index 986164f..4249c67 100644
+--- a/crisp_gym/config/home.py
++++ b/crisp_gym/config/home.py
+@@ -2,7 +2,7 @@
+ # TODO: make the configs robot specific
+ 
+ from enum import Enum
+-
++import numpy as np
+ home_close_to_table = [
+     -1.73960110e-02,
+     9.55319758e-02,
+@@ -12,7 +12,15 @@ home_close_to_table = [
+     2.06584183e00,
+     7.97426445e-01,
+ ]
+-
++home_teleop_up = [
++    0,
++    - 8 * np.pi / 16,
++    0,
++    -15 * np.pi / 16,
++    0,
++    6 * np.pi / 8,
++    np.pi / 4,
++]
+ home_front_up = [
+     -0.02312892,
+     -0.10664185,
+@@ -29,7 +37,7 @@ class HomeConfig(Enum):
+ 
+     CLOSE_TO_TABLE = home_close_to_table
+     FRONT_UP = home_front_up
+-
++    TELEOP_UP = home_teleop_up
+     def randomize(self, noise: float = 0.01) -> list:
+         """Randomize the home configuration."""
+         import numpy as np
+diff --git a/crisp_gym/config/teleop/right_leader.yaml b/crisp_gym/config/teleop/right_leader.yaml
+index b374498..fe1fc0d 100644
+--- a/crisp_gym/config/teleop/right_leader.yaml
++++ b/crisp_gym/config/teleop/right_leader.yaml
+@@ -12,7 +12,7 @@ leader:
+     - 7.97426445e-01
+ 
+ leader_gripper:
+-  joint_state_topic: /right/gripper/gripper_state_broadcaster/joint_states
++  joint_state_topic: /gripper/joint_states
+   # from_yaml: gripper_right.yaml
+   max_value: -0.07976700087890626
+   min_value: -1.2977477450683594
+diff --git a/crisp_gym/envs/manipulator_env.py b/crisp_gym/envs/manipulator_env.py
+index 8e4d3e3..b4b4d76 100644
+--- a/crisp_gym/envs/manipulator_env.py
++++ b/crisp_gym/envs/manipulator_env.py
+@@ -72,8 +72,8 @@ class ManipulatorBaseEnv(gym.Env):
+         super().__init__()
+         self.config = config
+ 
+-        if not rclpy.ok():
+-            rclpy.init()
++        # if not rclpy.ok():
++        #     rclpy.init()
+ 
+         self.robot = Robot(
+             namespace=namespace,
+@@ -103,7 +103,7 @@ class ManipulatorBaseEnv(gym.Env):
+         self.timestep = 0
+         self.ctrl_type = ControlType.UNDEFINED
+ 
+-        logger.debug(f"ManipulatorBaseEnv initialized with config: {self.config}")
++        logger.info(f"ManipulatorBaseEnv initialized with config: {self.config}")
+ 
+         self.control_rate = self.robot.node.create_rate(self.config.control_frequency)
+ 
+@@ -187,37 +187,38 @@ class ManipulatorBaseEnv(gym.Env):
+                 selected_observations[key] = observation_spaces[key]
+         return selected_observations
+ 
+-    def initialize(self, force: bool = False):
+-        """Initialize the environment.
+-
+-        Args:
+-            force (bool): If True, force re-initialization even if already initialized.
+-
+-        Raises:
+-            FileNotFoundError: If the cartesian or joint control parameter config file does not exist.
+-        """
+-        if not self._uninitialized and not force:
+-            logger.debug("Environment is already initialized.")
+-            return
+-
+-        self.wait_until_ready()
+-
+-        if self.config.cartesian_control_param_config:
+-            if not os.path.exists(self.config.cartesian_control_param_config):
+-                raise FileNotFoundError(
+-                    f"Cartesian control parameter config file not found: {self.config.cartesian_control_param_config}"
+-                )
+-            self.robot.cartesian_controller_parameters_client.load_param_config(
+-                file_path=self.config.cartesian_control_param_config
+-            )
+-        if self.config.joint_control_param_config:
+-            if not os.path.exists(self.config.joint_control_param_config):
+-                raise FileNotFoundError(
+-                    f"Joint control parameter config file not found: {self.config.joint_control_param_config}"
+-                )
+-            self.robot.joint_controller_parameters_client.load_param_config(
+-                file_path=self.config.joint_control_param_config
+-            )
++    # def initialize(self, force: bool = False):
++    #     """Initialize the environment.
++
++    #     Args:
++    #         force (bool): If True, force re-initialization even if already initialized.
++
++    #     Raises:
++    #         FileNotFoundError: If the cartesian or joint control parameter config file does not exist.
++    #     """
++    #     if not self._uninitialized and not force:
++    #         logger.debug("Environment is already initialized.")
++    #         return
++
++    #     self.wait_until_ready()
++
++    #     if self.config.cartesian_control_param_config:
++    #         if not os.path.exists(self.config.cartesian_control_param_config):
++    #             raise FileNotFoundError(
++    #                 f"Cartesian control parameter config file not found: {self.config.cartesian_control_param_config}"
++    #             )
++    #         self.robot.cartesian_controller_parameters_client.load_param_config(
++    #             file_path=self.config.cartesian_control_param_config
++    #         )
++    #     if self.config.joint_control_param_config:
++    #         logger.info("Loading joint_control_param_config")
++    #         if not os.path.exists(self.config.joint_control_param_config):
++    #             raise FileNotFoundError(
++    #                 f"Joint control parameter config file not found: {self.config.joint_control_param_config}"
++    #             )
++    #         self.robot.joint_controller_parameters_client.load_param_config(
++    #             file_path=self.config.joint_control_param_config
++    #         )
+ 
+     def wait_until_ready(self):
+         """Wait until the robot, gripper, cameras, and sensors are ready."""
+@@ -229,7 +230,7 @@ class ManipulatorBaseEnv(gym.Env):
+             self.gripper.wait_until_ready(timeout=3)
+ 
+         for camera in self.cameras:
+-            camera.wait_until_ready(timeout=3)
++            camera.wait_until_ready(timeout=30)
+ 
+         for sensor in self.sensors:
+             sensor.wait_until_ready(timeout=3)
+@@ -342,28 +343,29 @@ class ManipulatorBaseEnv(gym.Env):
+ 
+         return obs, reward, terminated, truncated, info
+ 
+-    @override
+-    def reset(
+-        self, *, seed: int | None = None, options: dict[str, Any] | None = None
+-    ) -> Tuple[dict, dict]:
+-        """Reset the environment."""
+-        super().reset(seed=seed, options=options)
++    # @override
++    # def reset(
++    #     self, *, seed: int | None = None, options: dict[str, Any] | None = None
++    # ) -> Tuple[dict, dict]:
++    #     """Reset the environment."""
++    #     super().reset(seed=seed, options=options)
+ 
+-        self.timestep = 0
++    #     self.timestep = 0
+ 
+-        self.initialize()
++    #     self.initialize()
+ 
+-        self.robot.reset_targets()
+-        self.robot.wait_until_ready()
+-        self.switch_to_default_controller()
++    #     # self.robot.reset_targets()
++    #     self.robot.wait_until_ready()
++    #     # self.switch_to_default_controller()
+ 
+-        if self.gripper is not None:
+-            self.gripper.enable_torque()
++    #     if self.gripper is not None:
++    #         self.gripper.enable_torque()
++    #         self.gripper.wait_until_ready()
+ 
+-        for sensor in self.sensors:
+-            sensor.reset()
++    #     for sensor in self.sensors:
++    #         sensor.reset()
+ 
+-        return self._get_obs(), {}
++    #     return self._get_obs(), {}
+ 
+     @override
+     def close(self):
+@@ -371,25 +373,25 @@ class ManipulatorBaseEnv(gym.Env):
+         self.robot.shutdown()
+         super().close()
+ 
+-    def switch_controller(self, control_type: str | ControlType):
+-        """Switch the controller type.
++    # def switch_controller(self, control_type: str | ControlType):
++    #     """Switch the controller type.
+ 
+-        This method switches the controller type of the robot to the specified control type.
++    #     This method switches the controller type of the robot to the specified control type.
+ 
+-        Args:
+-            control_type (str | ControlType): The control type to switch to.
+-        """
+-        desired_ctrl_type = (
+-            control_type
+-            if isinstance(control_type, ControlType)
+-            else ControlType.from_string(control_type)
+-        )
++    #     Args:
++    #         control_type (str | ControlType): The control type to switch to.
++    #     """
++    #     desired_ctrl_type = (
++    #         control_type
++    #         if isinstance(control_type, ControlType)
++    #         else ControlType.from_string(control_type)
++    #     )
+ 
+-        self.robot.controller_switcher_client.switch_controller(desired_ctrl_type.controller_name())
++    #     self.robot.controller_switcher_client.switch_controller(desired_ctrl_type.controller_name())
+ 
+-    def switch_to_default_controller(self):
+-        """Switch to the default controller type."""
+-        self.switch_controller(self.ctrl_type)
++    # def switch_to_default_controller(self):
++    #     """Switch to the default controller type."""
++    #     self.switch_controller(self.ctrl_type)
+ 
+     def home(self, home_config: list[float] | None = None, blocking: bool = True):
+         """Move the robot to the home position.
+@@ -402,8 +404,8 @@ class ManipulatorBaseEnv(gym.Env):
+             self.gripper.open()
+         self.robot.home(home_config=home_config, blocking=blocking)
+ 
+-        if not blocking:
+-            self.switch_to_default_controller()
++        # if not blocking:
++        #     self.switch_to_default_controller()
+ 
+     def get_metadata(self) -> dict:
+         """Generate metadata for the environment.
+@@ -565,6 +567,7 @@ class ManipulatorCartesianEnv(ManipulatorBaseEnv):
+             )
+ 
+         # Create action space with appropriate rotation dimension
++        
+         rot_low = -np.ones((rot_dim,), dtype=np.float32) * np.pi
+         rot_high = np.ones((rot_dim,), dtype=np.float32) * np.pi
+ 
+@@ -607,13 +610,22 @@ class ManipulatorCartesianEnv(ManipulatorBaseEnv):
+         return obs
+ 
+     @override
+-    def step(self, action: np.ndarray, block: bool = True) -> Tuple[dict, float, bool, bool, dict]:
++    def step(
++        self,
++        action: np.ndarray,
++        block: bool = True,
++        *,
++        control_gripper: bool = True,
++    ) -> Tuple[dict, float, bool, bool, dict]:
+         """Step the environment with a Cartesian action.
+ 
+         Args:
+             action (np.ndarray): Cartesian delta action [dx, dy, dz, *d_rot_action, gripper_action],
+                                 where d_rot_action dimension depends on the chosen orientation representation.
+             block (bool): If True, block to maintain the control rate.
++            control_gripper (bool): If False, skip sending the gripper component of
++                the action while still reading the real gripper feedback into the
++                observation. This is used when another node controls the gripper.
+ 
+         Returns:
+             Tuple[dict, float, bool, bool, dict]: Observation, reward, terminated flag, truncated flag, and info dictionary.
+@@ -636,7 +648,7 @@ class ManipulatorCartesianEnv(ManipulatorBaseEnv):
+         target_pose = Pose(position=target_position, orientation=target_orientation)
+         self.robot.set_target(pose=target_pose)
+ 
+-        if self.config.gripper_mode != GripperMode.NONE:
++        if control_gripper and self.config.gripper_mode != GripperMode.NONE:
+             self._set_gripper_action(action[-1])
+ 
+         if block:
+@@ -667,10 +679,10 @@ class ManipulatorJointEnv(ManipulatorBaseEnv):
+         super().__init__(config=config, namespace=namespace)
+ 
+         self.ctrl_type = ControlType.JOINT
+-
+         self.num_joints = self.config.robot_config.num_joints()
+-
++        # self.num_joints = 7 
+         # We add the target to the observation space to allow the agent to learn the target joint positions.
++        
+         if ObservationKeys.TARGET_OBS in self.config.observations_to_include_to_state:
+             self.observation_space: gym.spaces.Dict = gym.spaces.Dict(
+                 {
+@@ -682,7 +694,6 @@ class ManipulatorJointEnv(ManipulatorBaseEnv):
+                     ),
+                 },
+             )
+-
+         self.action_space = gym.spaces.Box(
+             low=np.concatenate(
+                 [
+@@ -705,6 +716,7 @@ class ManipulatorJointEnv(ManipulatorBaseEnv):
+             dtype=np.float32,
+         )
+ 
++
+     @override
+     def _get_obs(self) -> dict:
+         obs = super()._get_obs()
+@@ -728,7 +740,7 @@ class ManipulatorJointEnv(ManipulatorBaseEnv):
+         terminated = False
+         truncated = False
+         info = {}
+-
++        
+         assert action.shape == self.action_space.shape, (
+             f"Action shape {action.shape} does not match expected shape {self.action_space.shape}"
+         )
+@@ -774,7 +786,7 @@ def make_env(
+         ValueError: If the specified environment type or control type is not supported.
+     """
+     config = make_env_config(env_type, config_path=config_path, **config_overrides)
+-
++    logger.info(f"Creating environment of type: {env_type} with namespace: {namespace}")
+     if control_type.lower() == "cartesian":
+         return ManipulatorCartesianEnv(config=config, namespace=namespace)
+     elif control_type.lower() == "joint":
+diff --git a/crisp_gym/envs/manipulator_env_config.py b/crisp_gym/envs/manipulator_env_config.py
+index 3f11504..d53b0c4 100644
+--- a/crisp_gym/envs/manipulator_env_config.py
++++ b/crisp_gym/envs/manipulator_env_config.py
+@@ -278,7 +278,30 @@ class FrankaEnvConfig(ManipulatorEnvConfig, ABC):
+ 
+     control_frequency: float = 30.0
+ 
+-    robot_config: RobotConfig = field(default_factory=lambda: FrankaConfig())
++    robot_config: RobotConfig = field(default_factory=lambda: FrankaConfig(time_to_home=2.0))
++
++    gripper_config: GripperConfig | None = field(
++        default_factory=lambda: GripperConfig(min_value=0, max_value=1)
++    )
++
++    camera_configs: List[CameraConfig] = field(
++        default_factory=lambda: [
++            CameraConfig(
++                camera_name="primary",
++                camera_frame="primary_link",
++                resolution=[256, 256],
++                camera_color_image_topic="/right/right_third_person_camera/color/image_raw",
++                camera_color_info_topic="/right/right_third_person_camera/color/camera_info",
++            ),
++            # CameraConfig(
++            #     camera_name="wrist",
++            #     camera_frame="wrist_link",
++            #     resolution=[256, 256],
++            #     camera_color_image_topic="/wrist_camera/color/image_rect_raw",
++            #     camera_color_info_topic="/wrist_camera/color/camera_info",
++            # ),
++        ]
++    )
+ 
+     # Default controller configurations for Franka
+     cartesian_control_param_config: Path | None = field(
+@@ -296,7 +319,12 @@ class NoCamFrankaEnvConfig(FrankaEnvConfig):
+     """Franka Gym Environment Configuration."""
+ 
+     gripper_config: GripperConfig | None = field(
+-        default_factory=lambda: GripperConfig(min_value=0, max_value=1)
++        default_factory=lambda: GripperConfig(
++            min_value=0,
++            max_value=1,
++            command_topic="gripper/gripper_position_controller/commands",
++            joint_state_topic="gripper/joint_states",
++        )
+     )
+ 
+     camera_configs: List[CameraConfig] = field(default_factory=lambda: [])
+diff --git a/crisp_gym/record/record_functions.py b/crisp_gym/record/record_functions.py
+index c7de3cb..3ef7f4d 100644
+--- a/crisp_gym/record/record_functions.py
++++ b/crisp_gym/record/record_functions.py
+@@ -16,6 +16,7 @@ from crisp_gym.util.gripper_mode import GripperMode
+ if TYPE_CHECKING:
+     from crisp_gym.envs.manipulator_env import ManipulatorBaseEnv, ManipulatorCartesianEnv
+     from crisp_gym.teleop.teleop_robot import TeleopRobot
++    from crisp_gym.teleop.teleop_robot_servo import JointControlNode
+     from crisp_gym.teleop.teleop_sensor_stream import TeleopStreamedPose
+ 
+ 
+@@ -50,7 +51,11 @@ def _leader_gripper_to_action(
+         raise ValueError(f"Unsupported gripper control mode: {control_mode}")
+ 
+ 
+-def make_teleop_streamer_fn(env: ManipulatorCartesianEnv, leader: TeleopStreamedPose) -> Callable:
++def make_teleop_streamer_fn(
++    env: ManipulatorCartesianEnv,
++    leader: TeleopStreamedPose,
++    control_gripper: bool = True,
++) -> Callable:
+     """Create a teleoperation function for the leader robot using streamed pose data."""
+     prev_pose = leader.last_pose
+     first_step = True
+@@ -75,7 +80,10 @@ def make_teleop_streamer_fn(env: ManipulatorCartesianEnv, leader: TeleopStreamed
+         action_pose = pose - prev_pose
+         prev_pose = pose
+ 
+-        gripper = leader.gripper.value if leader.gripper is not None else 0.0
++        try:
++            gripper = leader.last_gripper
++        except RuntimeError:
++            gripper = 1.0
+ 
+         # Use the environment's orientation representation for the rotation part
+         rot_action = env.rotation_to_representation(action_pose.orientation)
+@@ -86,7 +94,11 @@ def make_teleop_streamer_fn(env: ManipulatorCartesianEnv, leader: TeleopStreamed
+                 [gripper],
+             ]
+         )
+-        obs, *_ = env.step(action, block=False)
++        obs, *_ = env.step(
++            action,
++            block=False,
++            control_gripper=control_gripper,
++        )
+         return obs, action
+ 
+     return _fn
+@@ -167,3 +179,16 @@ def make_teleop_fn(env: ManipulatorBaseEnv, leader: TeleopRobot) -> Callable:
+         return obs, action
+ 
+     return _fn
++
++
++def make_servo_teleop_fn(env: ManipulatorBaseEnv, leader: JointControlNode) -> Callable:
++    """Create a recording function for the servo-angle leader arm."""
++
++    def _fn() -> tuple:
++        if leader.last_action is None:
++            return None, None
++
++        action = np.asarray(leader.last_action, dtype=np.float32)
++        return env._get_obs(), action
++
++    return _fn
+diff --git a/crisp_gym/record/recording_manager.py b/crisp_gym/record/recording_manager.py
+index 636695f..a001243 100644
+--- a/crisp_gym/record/recording_manager.py
++++ b/crisp_gym/record/recording_manager.py
+@@ -2,9 +2,13 @@
+ 
+ import logging
+ import multiprocessing as mp
++import select
+ import subprocess
++import sys
++import termios
+ import threading
+ import time
++import tty
+ from abc import ABC, abstractmethod
+ from pathlib import Path
+ from typing import Callable, Literal
+@@ -475,6 +479,9 @@ class KeyboardRecordingManager(RecordingManager):
+         """
+         super().__init__(config=config, **kwargs)
+         self.listener = keyboard.Listener(on_press=self._on_press)
++        self._stdin_stop = threading.Event()
++        self._stdin_thread: threading.Thread | None = None
++        self._stdin_settings = None
+ 
+     @override
+     def get_instructions(self) -> str:
+@@ -494,36 +501,88 @@ class KeyboardRecordingManager(RecordingManager):
+             return
+ 
+         try:
+-            if self.state == "is_waiting":
+-                if key.char == "r":
+-                    self.state = "recording"
+-                if key.char == "q":
+-                    self.state = "exit"
+-            elif self.state == "recording":
+-                if key.char == "r":
+-                    self.state = "paused"
+-            elif self.state == "paused":
+-                if key.char == "q":
+-                    self.state = "exit"
+-                if key.char == "s":
+-                    self.state = "to_be_saved"
+-                if key.char == "d":
+-                    self.state = "to_be_deleted"
++            self._handle_char(key.char)
+         except AttributeError:
+             pass
+ 
++    def _handle_char(self, char: str | None) -> None:
++        """Apply a keyboard command character to the recording state."""
++        if char is None:
++            return
++
++        char = char.lower()
++        old_state = self.state
++        if self.state == "is_waiting":
++            if char == "r":
++                self.state = "recording"
++            if char == "q":
++                self.state = "exit"
++        elif self.state == "recording":
++            if char == "r":
++                self.state = "paused"
++        elif self.state == "paused":
++            if char == "q":
++                self.state = "exit"
++            if char == "s":
++                self.state = "to_be_saved"
++            if char == "d":
++                self.state = "to_be_deleted"
++
++        if char in {"r", "s", "d", "q"}:
++            logger.info(f"Keyboard command received: {char} ({old_state} -> {self.state})")
++
++    def _poll_stdin_once(self) -> None:
++        """Poll the recorder terminal once for a single keypress."""
++        if not sys.stdin.isatty():
++            return
++        readable, _, _ = select.select([sys.stdin], [], [], 0.0)
++        if readable:
++            char = sys.stdin.read(1)
++            self._handle_char(char)
++
++    def _stdin_loop(self) -> None:
++        """Fallback listener for terminals where pynput cannot receive key events."""
++        while not self._stdin_stop.is_set():
++            self._poll_stdin_once()
++            time.sleep(0.05)
++
+     def stop(self) -> None:
+         """Stop the keyboard listener."""
+         self.listener.stop()
+ 
+     def __enter__(self) -> "RecordingManager":  # noqa: D105
+         self.listener.start()
++        if sys.stdin.isatty():
++            self._stdin_settings = termios.tcgetattr(sys.stdin)
++            tty.setcbreak(sys.stdin.fileno())
++            self._stdin_thread = threading.Thread(target=self._stdin_loop, daemon=True)
++            self._stdin_thread.start()
++            logger.info("Keyboard stdin fallback enabled. Press r/s/d/q in this terminal.")
++        else:
++            logger.warning(
++                "Keyboard stdin fallback disabled because stdin is not a TTY. "
++                "Use an interactive terminal or --recording-manager-type ros."
++            )
+         return super().__enter__()
+ 
+     def __exit__(self, exc_type, exc_value, traceback) -> None:  # noqa: ANN001, D105
++        self._stdin_stop.set()
++        if self._stdin_thread is not None:
++            self._stdin_thread.join(timeout=1.0)
++        if self._stdin_settings is not None:
++            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self._stdin_settings)
+         self.listener.stop()
+         super().__exit__(exc_type, exc_value, traceback)
+ 
++    def _wait_for_start_signal(self) -> None:
++        """Wait until recording starts, polling stdin in the main thread too."""
++        logger.info("Waiting to start recording...")
++        while self.state != "recording":
++            if self.state == "exit":
++                raise StopIteration
++            self._poll_stdin_once()
++            time.sleep(0.05)
++
+ 
+ def make_recording_manager(
+     recording_manager_type: Literal["keyboard", "ros"],
+diff --git a/crisp_gym/scripts/record_lerobot_format_leader_follower.py b/crisp_gym/scripts/record_lerobot_format_leader_follower.py
+index ac25881..09ae85f 100644
+--- a/crisp_gym/scripts/record_lerobot_format_leader_follower.py
++++ b/crisp_gym/scripts/record_lerobot_format_leader_follower.py
+@@ -3,6 +3,7 @@
+ import argparse
+ import json
+ import logging
++import time
+ 
+ import numpy as np
+ import rclpy
+@@ -11,10 +12,15 @@ import crisp_gym  # noqa: F401
+ from crisp_gym.config.home import HomeConfig
+ from crisp_gym.envs.manipulator_env import ManipulatorCartesianEnv, make_env
+ from crisp_gym.envs.manipulator_env_config import list_env_configs
+-from crisp_gym.record.record_functions import make_teleop_fn, make_teleop_streamer_fn
++from crisp_gym.record.record_functions import (
++    make_servo_teleop_fn,
++    make_teleop_fn,
++    make_teleop_streamer_fn,
++)
+ from crisp_gym.record.recording_manager import make_recording_manager
+ from crisp_gym.teleop.teleop_robot import TeleopRobot, make_leader
+ from crisp_gym.teleop.teleop_robot_config import list_leader_configs
++from crisp_gym.teleop.teleop_robot_servo import JointControlNode
+ from crisp_gym.teleop.teleop_sensor_stream import TeleopStreamedPose
+ from crisp_gym.util import prompt
+ from crisp_gym.util.lerobot_features import get_features
+@@ -82,13 +88,13 @@ def main():
+     parser.add_argument(
+         "--follower-config",
+         type=str,
+-        default=None,
++        default="no_cam_franka",
+         help="Configuration name for the follower robot. You can define your own configurations, please check https://utiasdsl.github.io/crisp_controllers/misc/create_own_config/.",
+     )
+     parser.add_argument(
+         "--follower-namespace",
+         type=str,
+-        default=None,
++        default="",
+         help="Namespace for the follower robot. This is used to identify the robot in the ROS ecosystem.",
+     )
+     parser.add_argument(
+@@ -115,15 +121,109 @@ def main():
+         action="store_true",
+         help="Whether to use streamed teleop (e.g., from a phone or VR device) for the leader robot.",
+     )
++    parser.add_argument(
++        "--use-quest3-controller",
++        action="store_true",
++        help=(
++            "Use the Quest 3 controller streamed-teleop path. This is an alias for "
++            "--use-streamed-teleop --no-use-servo-leader with Quest-friendly logging."
++        ),
++    )
++    parser.add_argument(
++        "--streamed-pose-topic",
++        type=str,
++        default="/phone_pose",
++        help="PoseStamped topic consumed by streamed teleop.",
++    )
++    parser.add_argument(
++        "--streamed-gripper-topic",
++        type=str,
++        default="/phone_gripper",
++        help="Float32 topic consumed by streamed teleop for gripper commands.",
++    )
++    parser.add_argument(
++        "--streamed-teleop-timeout",
++        type=float,
++        default=5.0,
++        help="Seconds to wait for the first streamed teleop pose.",
++    )
++    parser.add_argument(
++        "--disable-recorder-gripper-control",
++        action="store_true",
++        help=(
++            "Record streamed gripper actions in the dataset but do not execute them "
++            "through the environment. Use this when another node, such as the Quest "
++            "adapter, directly controls the Franka gripper to avoid competing commands."
++        ),
++    )
++    parser.add_argument(
++        "--use-servo-leader",
++        action=argparse.BooleanOptionalAction,
++        default=True,
++        help="Use the servo-angle leader arm on /servo_angles for joint teleoperation.",
++    )
+     parser.add_argument(
+         "--home-config-noise",
+         type=float,
+         default=0.0,
+         help="Noise to add to the home configuration when homing the robots to randomize the position a bit.",
+     )
+-
++    parser.add_argument(
++        "--skip-home",
++        action="store_true",
++        help=(
++            "Skip the automatic follower homing step before recording. Useful for "
++            "Quest/controller bringup when the robot is already in a safe pose."
++        ),
++    )
++    parser.add_argument(
++        "--home-between-episodes",
++        action="store_true",
++        help=(
++            "After each saved/deleted episode, return the follower to the standard "
++            "home pose before waiting for the next recording. The homing motion is "
++            "performed outside the recorded episode."
++        ),
++    )
++    parser.add_argument(
++        "--use-current-pose-as-episode-start",
++        action="store_true",
++        help=(
++            "Capture the follower's current Cartesian end-effector pose when the "
++            "recorder starts and return to that exact pose between episodes. This "
++            "implies --skip-home and --home-between-episodes."
++        ),
++    )
++    parser.add_argument(
++        "--episode-start-return-speed",
++        type=float,
++        default=0.03,
++        help=(
++            "Cartesian speed in m/s for returning to the captured episode start "
++            "pose when --use-current-pose-as-episode-start is enabled."
++        ),
++    )
+     args = parser.parse_args()
+ 
++    if args.use_quest3_controller:
++        args.use_streamed_teleop = True
++        args.use_servo_leader = False
++
++    if args.use_current_pose_as_episode_start:
++        args.skip_home = True
++        args.home_between_episodes = True
++
++    if args.use_streamed_teleop and args.use_servo_leader:
++        parser.error(
++            "--use-streamed-teleop cannot be combined with --use-servo-leader. "
++            "Pass --no-use-servo-leader, or use --use-quest3-controller."
++        )
++
++    if args.use_streamed_teleop and args.joint_control:
++        parser.error(
++            "Streamed teleop is currently Cartesian-only. Do not pass --joint-control."
++        )
++
+     # Set up logger
+     logger = logging.getLogger(__name__)
+     setup_logging(level=args.log_level)
+@@ -140,14 +240,14 @@ def main():
+         )
+         logger.info(f"Using follower namespace: {args.follower_namespace}")
+ 
+-    if args.leader_namespace is None and not args.use_streamed_teleop:
++    if args.leader_namespace is None and not args.use_streamed_teleop and not args.use_servo_leader:
+         args.leader_namespace = prompt.prompt(
+             "Please enter the leader robot namespace (e.g., 'left', 'right', ...)",
+             default="left",
+         )
+         logger.info(f"Using leader namespace: {args.leader_namespace}")
+ 
+-    if args.leader_config is None and not args.use_streamed_teleop:
++    if args.leader_config is None and not args.use_streamed_teleop and not args.use_servo_leader:
+         leader_configs = list_leader_configs()
+         args.leader_config = prompt.prompt(
+             "Please enter the leader robot configuration name.",
+@@ -166,7 +266,7 @@ def main():
+         logger.info(f"Using follower configuration: {args.follower_config}")
+ 
+     try:
+-        ctrl_type = "cartesian" if not args.joint_control else "joint"
++        ctrl_type = "joint" if args.use_servo_leader or args.joint_control else "cartesian"
+ 
+         env = make_env(
+             env_type=args.follower_config,
+@@ -174,10 +274,29 @@ def main():
+             namespace=args.follower_namespace,
+         )
+ 
+-        leader: TeleopRobot | TeleopStreamedPose | None = None
+-        if args.use_streamed_teleop:
+-            leader = TeleopStreamedPose()
+-            logger.info("Using streamed teleop for the leader robot.")
++        leader: TeleopRobot | TeleopStreamedPose | JointControlNode | None = None
++        if args.use_servo_leader:
++            leader = JointControlNode(robot=env.robot, gripper=env.gripper)
++            logger.info("Using servo leader arm on /servo_angles. Leader is ready.")
++        elif args.use_streamed_teleop:
++            leader = TeleopStreamedPose(
++                namespace=args.leader_namespace or "",
++                pose_topic=args.streamed_pose_topic,
++                gripper_topic=args.streamed_gripper_topic,
++            )
++            leader.wait_until_ready(timeout=args.streamed_teleop_timeout)
++            if args.use_quest3_controller:
++                logger.info(
++                    "Using Quest 3 controller streamed teleop from %s and %s.",
++                    args.streamed_pose_topic,
++                    args.streamed_gripper_topic,
++                )
++            else:
++                logger.info(
++                    "Using streamed teleop from %s and %s.",
++                    args.streamed_pose_topic,
++                    args.streamed_gripper_topic,
++                )
+         else:
+             leader = make_leader(args.leader_config, namespace=args.leader_namespace)
+             leader.wait_until_ready()
+@@ -214,18 +333,65 @@ def main():
+             f"Environment metadata saved to {recording_manager.dataset_directory / 'meta' / 'crisp_meta.json'}"
+         )
+ 
+-        logger.info("Homing both robots before starting with recording.")
++        if args.skip_home:
++            logger.info("Skipping automatic homing before starting with recording.")
++        else:
++            logger.info("Homing both robots before starting with recording.")
+ 
+         # Prepare environment and leader
+         if isinstance(leader, TeleopRobot):
+             leader.prepare_for_teleop()
+ 
+         env.wait_until_ready()
+-        env.home(home_config=HomeConfig.CLOSE_TO_TABLE.randomize(noise=args.home_config_noise))
++        session_start_pose = None
++        if args.use_current_pose_as_episode_start:
++            session_start_pose = env.robot.end_effector_pose.copy()
++            logger.info(
++                "Captured current follower pose as the episode start pose: "
++                "position=%s, quaternion=%s",
++                np.array2string(session_start_pose.position, precision=4),
++                np.array2string(session_start_pose.orientation.as_quat(), precision=4),
++            )
++
++        if args.skip_home:
++            env.robot.reset_targets()
++        elif not isinstance(leader, JointControlNode):
++            env.home(home_config=HomeConfig.CLOSE_TO_TABLE.randomize(noise=args.home_config_noise))
+         env.reset()
++        if isinstance(leader, JointControlNode):
++            leader.prepare_for_teleop(home=not args.skip_home)
+ 
+         tasks = list(args.tasks)
+ 
++        def home_follower_between_episodes():
++            """Return the follower to a repeatable start pose outside recording."""
++            env.robot.reset_targets()
++            if session_start_pose is not None:
++                logger.info(
++                    "Returning follower to the captured episode start pose between episodes."
++                )
++                env.robot.move_to(
++                    pose=session_start_pose.copy(),
++                    speed=args.episode_start_return_speed,
++                )
++            else:
++                logger.info("Returning follower to the standard start pose between episodes.")
++                if isinstance(leader, JointControlNode):
++                    home_config = leader.home_config
++                else:
++                    home_config = HomeConfig.CLOSE_TO_TABLE.randomize(
++                        noise=args.home_config_noise
++                    )
++                env.robot.home(blocking=True, home_config=home_config)
++            time.sleep(0.5)
++            env.reset()
++            if env.gripper is not None and not args.disable_recorder_gripper_control:
++                env.gripper.open()
++            logger.info(
++                "Follower is at the standard start pose. Re-anchor/hold the Quest "
++                "controller steady before starting the next episode."
++            )
++
+         def on_start():
+             """Hook function to be called when starting a new episode."""
+             env.robot.reset_targets()
+@@ -244,18 +410,30 @@ def main():
+ 
+                 if leader.gripper is not None:
+                     leader.gripper.disable_torque()
++            elif isinstance(leader, JointControlNode):
++                leader.prepare_for_teleop(home=False)
+ 
+         def on_end():
+             """Hook function to be called when stopping the recording."""
+             env.robot.reset_targets()
+-            random_home = HomeConfig.CLOSE_TO_TABLE.randomize(noise=args.home_config_noise)
+-            env.robot.home(blocking=False, home_config=random_home)
++            if args.skip_home or args.home_between_episodes:
++                logger.info("Skipping immediate follower homing after recording.")
++                return
++            if isinstance(leader, JointControlNode):
++                home_config = leader.home_config
++            else:
++                home_config = HomeConfig.CLOSE_TO_TABLE.randomize(
++                    noise=args.home_config_noise
++                )
++            env.robot.home(blocking=True, home_config=home_config)
++            time.sleep(0.5)
+             if isinstance(leader, TeleopRobot):
+                 leader.robot.reset_targets()
+                 # Activate incase leader should go to the same position as the follower
+                 # leader.robot.home(blocking=False, home_config=random_home)
+                 leader.robot.home(blocking=False)
+-            env.gripper.open()
++            if env.gripper is not None and not args.disable_recorder_gripper_control:
++                env.gripper.open()
+ 
+         with recording_manager:
+             while not recording_manager.done():
+@@ -267,10 +445,16 @@ def main():
+                 teleop_fn = None
+                 if isinstance(leader, TeleopRobot):
+                     teleop_fn = make_teleop_fn(env, leader)
++                elif isinstance(leader, JointControlNode):
++                    teleop_fn = make_servo_teleop_fn(env, leader)
+                 elif isinstance(leader, TeleopStreamedPose) and isinstance(
+                     env, ManipulatorCartesianEnv
+                 ):
+-                    teleop_fn = make_teleop_streamer_fn(env, leader)
++                    teleop_fn = make_teleop_streamer_fn(
++                        env,
++                        leader,
++                        control_gripper=not args.disable_recorder_gripper_control,
++                    )
+                 else:
+                     raise ValueError(
+                         "Streamed teleop is only compatible with Cartesian control. Please disable joint control."
+@@ -279,18 +463,33 @@ def main():
+                 task = tasks[np.random.randint(0, len(tasks))] if tasks else "No task specified."
+                 logger.info(f"▷ Task: {task}")
+ 
++                episode_count_before = recording_manager.episode_count
+                 recording_manager.record_episode(
+                     data_fn=teleop_fn,
+                     task=task,
+                     on_start=on_start,
+                     on_end=on_end,
+                 )
++                episode_was_saved = recording_manager.episode_count > episode_count_before
++                should_return_to_start = args.home_between_episodes and (
++                    not recording_manager.done() or episode_was_saved
++                )
++                if should_return_to_start:
++                    home_follower_between_episodes()
+ 
+         if isinstance(leader, TeleopRobot):
+             logger.info("Homing leader.")
+             leader.robot.home()
++        elif isinstance(leader, JointControlNode):
++            leader.stop()
+         logger.info("Homing follower.")
+-        env.home()
++        try:
++            env.home()
++        except Exception as e:
++            logger.warning(
++                "Skipping follower homing during shutdown because the controller "
++                f"is not available: {e}"
++            )
+ 
+         logger.info("Closing the environment.")
+         env.close()
+diff --git a/crisp_gym/teleop/teleop_robot.py b/crisp_gym/teleop/teleop_robot.py
+index a9ecae8..6e911d0 100644
+--- a/crisp_gym/teleop/teleop_robot.py
++++ b/crisp_gym/teleop/teleop_robot.py
+@@ -5,6 +5,47 @@ from crisp_py.robot import Robot
+ 
+ from crisp_gym.teleop.teleop_robot_config import TeleopRobotConfig, make_leader_config
+ 
++import rclpy
++from rclpy.node import Node
++from std_msgs.msg import Float64MultiArray
++import numpy as np
++
++from dataclasses import dataclass, field
++from pathlib import Path
++from typing import List
++from scipy.spatial.transform import Rotation
++from crisp_py.utils.geometry import OrientationRepresentation
++class ObservationKeys:
++    """Standardized keys for observations in manipulator environments."""
++
++    STATE_OBS = "observation.state"
++
++    GRIPPER_OBS = STATE_OBS + ".gripper"
++    JOINT_OBS = STATE_OBS + ".joints"
++    CARTESIAN_OBS = STATE_OBS + ".cartesian"
++    TARGET_OBS = STATE_OBS + ".target"
++    SENSOR_OBS = STATE_OBS + ".sensors"
++
++    IMAGE_OBS = "observation.images"
++
++
++ALLOWED_STATE_OBS_KEYS = {
++    ObservationKeys.GRIPPER_OBS,
++    ObservationKeys.JOINT_OBS,
++    ObservationKeys.CARTESIAN_OBS,
++    ObservationKeys.TARGET_OBS,
++    ObservationKeys.SENSOR_OBS,
++}
++
++observations_to_include_to_state: List[str] = field(
++        default_factory=lambda: [
++            ObservationKeys.CARTESIAN_OBS,
++            ObservationKeys.JOINT_OBS,
++            ObservationKeys.GRIPPER_OBS,
++            ObservationKeys.TARGET_OBS,
++        ]
++    )
++
+ 
+ class TeleopRobot:
+     """Class defining the teleoperation leader robot in a leader-follower setup.
+diff --git a/crisp_gym/teleop/teleop_robot_config.py b/crisp_gym/teleop/teleop_robot_config.py
+index 3ed465e..a3d5322 100644
+--- a/crisp_gym/teleop/teleop_robot_config.py
++++ b/crisp_gym/teleop/teleop_robot_config.py
+@@ -17,6 +17,13 @@ if TYPE_CHECKING:
+     from crisp_py.robot import RobotConfig
+ 
+ 
++def _require_config(filename: str) -> Path:
++    config_path = find_config(filename)
++    if config_path is None:
++        raise FileNotFoundError(f"Config file '{filename}' not found in CRISP config paths")
++    return config_path
++
++
+ @dataclass
+ class TeleopRobotConfig(ABC):
+     """Configuration for the teleoperation leader robot.
+@@ -84,7 +91,7 @@ class LeftAlohaFrankaTeleopRobotConfig(TeleopRobotConfig):
+     leader: RobotConfig = field(default_factory=lambda: FrankaConfig())
+     leader_gripper: GripperConfig | None = field(
+         default_factory=lambda: GripperConfig.from_yaml(
+-            path=(find_config("trigger_left.yaml")).resolve()
++            path=_require_config("grippers/trigger_left.yaml").resolve()
+         )
+     )
+ 
+@@ -103,7 +110,7 @@ class RightAlohaFrankaTeleopRobotConfig(TeleopRobotConfig):
+     leader: RobotConfig = field(default_factory=lambda: FrankaConfig())
+     leader_gripper: GripperConfig | None = field(
+         default_factory=lambda: GripperConfig.from_yaml(
+-            path=(find_config("gripper_right.yaml")).resolve()
++            path=_require_config("grippers/gripper_right.yaml").resolve()
+         )
+     )
+ 
+diff --git a/crisp_gym/teleop/teleop_sensor_stream.py b/crisp_gym/teleop/teleop_sensor_stream.py
+index b7f1390..5cea181 100644
+--- a/crisp_gym/teleop/teleop_sensor_stream.py
++++ b/crisp_gym/teleop/teleop_sensor_stream.py
+@@ -15,7 +15,12 @@ from std_msgs.msg import Float32
+ class TeleopStreamedPose:
+     """Class to handle teleoperation using streamed pose and gripper data potentially from a phone, VR device, etc."""
+ 
+-    def __init__(self, namespace: str = ""):
++    def __init__(
++        self,
++        namespace: str = "",
++        pose_topic: str | None = None,
++        gripper_topic: str | None = None,
++    ):
+         """Initialize the TeleopStreamedPose class."""
+         if not rclpy.ok():
+             rclpy.init()
+@@ -26,9 +31,8 @@ class TeleopStreamedPose:
+         self._last_pose: Pose | None = None
+         self._last_gripper: float | None = None
+ 
+-        # Set this with config
+-        self._gripper_topic = f"/{self._prefix}phone_gripper"
+-        self._pose_topic = f"/{self._prefix}phone_pose"
++        self._gripper_topic = gripper_topic or f"/{self._prefix}phone_gripper"
++        self._pose_topic = pose_topic or f"/{self._prefix}phone_pose"
+ 
+         self.node.create_subscription(
+             PoseStamped,
+@@ -40,7 +44,7 @@ class TeleopStreamedPose:
+ 
+         self.node.create_subscription(
+             Float32,
+-            self._griper_topic,
++            self._gripper_topic,
+             callback=self._callback_gripper,
+             callback_group=ReentrantCallbackGroup(),
+             qos_profile=qos_profile_sensor_data,
+@@ -98,8 +102,11 @@ class TeleopStreamedPose:
+         """Wait until the leader robot and its gripper are ready."""
+         start_time = time.time()
+         while not self.is_ready() and rclpy.ok():
+-            rclpy.spin_once(self.node, timeout_sec=0.1)
++            time.sleep(0.05)
+             if time.time() - start_time > timeout:
+-                raise TimeoutError("Timed out waiting for the teleop streamer to be ready.")
++                raise TimeoutError(
++                    "Timed out waiting for the teleop streamer to be ready. "
++                    f"Check with 'ros2 topic echo {self._pose_topic} --once'."
++                )
+         if not rclpy.ok():
+             raise RuntimeError("ROS2 has been shutdown.")
+diff --git a/crisp_gym/util/lerobot_features.py b/crisp_gym/util/lerobot_features.py
+index 9328bbc..4edb1df 100644
+--- a/crisp_gym/util/lerobot_features.py
++++ b/crisp_gym/util/lerobot_features.py
+@@ -101,8 +101,12 @@ def get_features(
+             state_feature_names += names
+ 
+         elif feature_key.startswith("task"):
+-            continue  # Task features are handled separately
+-
++            # features[feature_key] = {
++            #         "dtype": "string",
++            #         "shape": env.observation_space[feature_key].shape,
++            #         # "names": ["height", "width", "channels"],
++            #     }
++            continue
+         elif feature_key.startswith("observation.images"):
+             if not use_video:
+                 features[feature_key] = {
+diff --git a/pyproject.toml b/pyproject.toml
+index 97f2fdf..bd575c0 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -3,7 +3,7 @@ name = "crisp-gym"
+ version = "4.1.0"
+ description = "Simple gymnasium environments for crisp_py"
+ readme = "README.md"
+-requires-python = ">=3.11"
++requires-python = ">=3.10"
+ dependencies = [
+     "ruff>=0.11.9",
+     "gymnasium>=0.26.3,<2",
+@@ -20,6 +20,7 @@ authors = [
+ crisp-deploy-policy = "crisp_gym.scripts.deploy_policy:main"
+ crisp-record-leader-follower = "crisp_gym.scripts.record_lerobot_format_leader_follower:main"
+ crisp-check-config = "crisp_gym.scripts.check_config:main"
++crisp-quest3-stream-adapter = "crisp_gym.scripts.quest3_stream_adapter:main"
+ 
+ [tool.ruff]
+ exclude = [
+diff --git a/crisp_gym/config/envs/dual_cam_franka.yaml b/crisp_gym/config/envs/dual_cam_franka.yaml
+new file mode 100644
+index 0000000..f95dacf
+--- /dev/null
++++ b/crisp_gym/config/envs/dual_cam_franka.yaml
+@@ -0,0 +1,34 @@
++control_frequency: 30.0
++gripper_mode: "absolute_continuous"
++gripper_threshold: 0.1
++
++cartesian_control_param_config: null
++joint_control_param_config: null
++
++robot_config:
++  robot_type: "franka"
++  time_to_home: 2.0
++
++gripper_config:
++  min_value: 0
++  max_value: 1
++  command_topic: "gripper/gripper_position_controller/commands"
++  joint_state_topic: "gripper/joint_states"
++  reboot_service: "gripper/reboot_gripper"
++  enable_torque_service: "gripper/dynamixel_hardware_interface/set_dxl_torque"
++
++camera_configs:
++  - camera_name: "primary"
++    camera_frame: "right_third_person_camera_color_optical_frame"
++    resolution: [256, 256]
++    camera_color_image_topic: "right/right_third_person_camera/color/image_raw"
++    camera_color_info_topic: "right/right_third_person_camera/color/camera_info"
++    max_image_delay: 1.0
++  - camera_name: "wrist"
++    camera_frame: "right_wrist_camera_color_optical_frame"
++    resolution: [256, 256]
++    camera_color_image_topic: "right/right_wrist_camera/color/image_raw"
++    camera_color_info_topic: "right/right_wrist_camera/color/camera_info"
++    max_image_delay: 1.0
++
++sensor_configs: []
+diff --git a/crisp_gym/config/envs/third_person_cam_franka.yaml b/crisp_gym/config/envs/third_person_cam_franka.yaml
+new file mode 100644
+index 0000000..cbdb312
+--- /dev/null
++++ b/crisp_gym/config/envs/third_person_cam_franka.yaml
+@@ -0,0 +1,25 @@
++control_frequency: 30.0
++gripper_enabled: false
++gripper_continuous_control: true
++gripper_threshold: 0.1
++
++cartesian_control_param_config: null
++joint_control_param_config: null
++
++robot_config:
++  robot_type: "franka"
++  time_to_home: 2.0
++
++gripper_config:
++  min_value: 0
++  max_value: 1
++
++camera_configs:
++  - camera_name: "primary"
++    camera_frame: "right_third_person_camera_color_optical_frame"
++    resolution: [256, 256]
++    camera_color_image_topic: "right/right_third_person_camera/color/image_raw"
++    camera_color_info_topic: "right/right_third_person_camera/color/camera_info"
++    max_image_delay: 1.0
++
++sensor_configs: []
+diff --git a/crisp_gym/scripts/convert_lerobot_abs_joint_to_delta_joint.py b/crisp_gym/scripts/convert_lerobot_abs_joint_to_delta_joint.py
+new file mode 100644
+index 0000000..dc76fc8
+--- /dev/null
++++ b/crisp_gym/scripts/convert_lerobot_abs_joint_to_delta_joint.py
+@@ -0,0 +1,307 @@
++#!/usr/bin/env python3
++"""Convert CRISP Franka LeRobot datasets from absolute joint actions to deltas.
++
++The original CRISP Franka recorder stores an 8-D action:
++
++    [target_joint_0, ..., target_joint_6, gripper]
++
++This script writes a separate dataset root whose action is:
++
++    [delta_joint_0, ..., delta_joint_6, gripper]
++
++where delta_joint[t] = target_joint[t + 1] - target_joint[t]. The final frame
++has zero joint deltas because there is no next target.
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import shutil
++from pathlib import Path
++from typing import Iterable
++
++import numpy as np
++import pandas as pd
++
++
++DEFAULT_DATASETS = [
++    "franka_test_135",
++    "franka_test_136",
++    "franka_test_137",
++    "franka_test_139",
++    "franka_test_140",
++    "franka_test_141",
++    "franka_test_144",
++    "franka_test_146",
++    "franka_test_148",
++    "franka_test_149",
++    "franka_test_150",
++    "franka_test_151",
++    "franka_test_152",
++    "franka_test_153",
++    "franka_test_154",
++    "franka_test_155",
++    "franka_test_156",
++    "franka_test_157",
++    "franka_test_158",
++    "franka_test_161",
++]
++
++
++DELTA_MODALITY = {
++    "state": {
++        "joints": {
++            "start": 7,
++            "end": 14,
++            "original_key": "observation.state",
++        },
++        "gripper": {
++            "start": 6,
++            "end": 7,
++            "original_key": "observation.state",
++        },
++    },
++    "action": {
++        "delta_joints": {
++            "start": 0,
++            "end": 7,
++            "original_key": "action",
++            "absolute": False,
++        },
++        "gripper": {
++            "start": 7,
++            "end": 8,
++            "original_key": "action",
++            "absolute": True,
++        },
++    },
++    "video": {
++        "primary_image": {
++            "original_key": "observation.images.primary",
++        },
++    },
++    "annotation": {
++        "human.action.task_description": {
++            "original_key": "task_index",
++        },
++    },
++}
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(
++        description="Create a delta-joint copy of CRISP Franka LeRobot datasets."
++    )
++    parser.add_argument(
++        "--input-root",
++        type=Path,
++        required=True,
++        help="Directory containing the original franka_test_* datasets.",
++    )
++    parser.add_argument(
++        "--output-root",
++        type=Path,
++        required=True,
++        help="Directory where converted datasets will be written.",
++    )
++    parser.add_argument(
++        "--datasets",
++        nargs="+",
++        default=DEFAULT_DATASETS,
++        help="Dataset directory names to convert.",
++    )
++    parser.add_argument(
++        "--overwrite",
++        action="store_true",
++        help="Replace existing output dataset directories.",
++    )
++    parser.add_argument(
++        "--media-mode",
++        choices=["copy", "symlink"],
++        default="copy",
++        help="Copy or symlink images/videos directories into the output dataset.",
++    )
++    parser.add_argument(
++        "--max-abs-delta",
++        type=float,
++        default=None,
++        help="Optional symmetric clip for joint deltas in radians.",
++    )
++    return parser.parse_args()
++
++
++def copy_dataset_tree(src: Path, dst: Path, media_mode: str) -> None:
++    dst.mkdir(parents=True, exist_ok=False)
++    media_dirs = {"images", "videos"}
++    for child in src.iterdir():
++        target = dst / child.name
++        if child.is_dir():
++            if child.name in media_dirs and media_mode == "symlink":
++                target.symlink_to(child.resolve(), target_is_directory=True)
++            else:
++                shutil.copytree(child, target, symlinks=True)
++        else:
++            shutil.copy2(child, target)
++
++
++def load_json(path: Path) -> dict:
++    with path.open("r", encoding="utf-8") as f:
++        return json.load(f)
++
++
++def write_json(path: Path, data: dict) -> None:
++    with path.open("w", encoding="utf-8") as f:
++        json.dump(data, f, indent=2)
++        f.write("\n")
++
++
++def stat_block(values: np.ndarray) -> dict:
++    return {
++        "min": values.min(axis=0).astype(float).tolist(),
++        "max": values.max(axis=0).astype(float).tolist(),
++        "mean": values.mean(axis=0).astype(float).tolist(),
++        "std": values.std(axis=0).astype(float).tolist(),
++        "count": [int(values.shape[0])],
++    }
++
++
++def update_episode_stats(stats_path: Path, action_stats_by_episode: dict[int, dict]) -> None:
++    if not stats_path.exists():
++        return
++
++    updated_lines = []
++    with stats_path.open("r", encoding="utf-8") as f:
++        for line in f:
++            if not line.strip():
++                continue
++            entry = json.loads(line)
++            episode_index = int(entry.get("episode_index", 0))
++            if episode_index in action_stats_by_episode:
++                entry.setdefault("stats", {})["action"] = action_stats_by_episode[episode_index]
++            updated_lines.append(entry)
++
++    with stats_path.open("w", encoding="utf-8") as f:
++        for entry in updated_lines:
++            f.write(json.dumps(entry) + "\n")
++
++
++def remove_starvla_caches(meta_dir: Path) -> None:
++    cache_names = [
++        "statistics.json",
++        "dataset_statistics.json",
++        "steps_data_index.pkl",
++        "episode_data_index.safetensors",
++    ]
++    for name in cache_names:
++        path = meta_dir / name
++        if path.exists():
++            path.unlink()
++
++
++def parquet_paths(dataset_dir: Path) -> Iterable[Path]:
++    return sorted((dataset_dir / "data").glob("chunk-*/episode_*.parquet"))
++
++
++def convert_parquet(path: Path, max_abs_delta: float | None) -> tuple[int, dict, float]:
++    df = pd.read_parquet(path)
++    if "action" not in df.columns:
++        raise KeyError(f"{path} has no 'action' column")
++
++    action = np.stack(df["action"].to_numpy()).astype(np.float32)
++    if action.ndim != 2 or action.shape[1] != 8:
++        raise ValueError(f"{path} action shape is {action.shape}, expected (N, 8)")
++
++    delta_action = np.zeros_like(action, dtype=np.float32)
++    if action.shape[0] > 1:
++        delta_action[:-1, :7] = action[1:, :7] - action[:-1, :7]
++    delta_action[:, 7] = action[:, 7]
++
++    if max_abs_delta is not None:
++        delta_action[:, :7] = np.clip(delta_action[:, :7], -max_abs_delta, max_abs_delta)
++
++    df["action"] = [row for row in delta_action]
++    df.to_parquet(path, index=False)
++
++    episode_index = int(df["episode_index"].iloc[0]) if "episode_index" in df.columns else 0
++    max_delta = float(np.max(np.abs(delta_action[:, :7]))) if delta_action.size else 0.0
++    return episode_index, stat_block(delta_action), max_delta
++
++
++def update_info_json(dataset_dir: Path) -> None:
++    info_path = dataset_dir / "meta" / "info.json"
++    if not info_path.exists():
++        return
++
++    info = load_json(info_path)
++    action_feature = info.get("features", {}).get("action")
++    if action_feature:
++        action_feature["names"] = [
++            "delta_joint_0",
++            "delta_joint_1",
++            "delta_joint_2",
++            "delta_joint_3",
++            "delta_joint_4",
++            "delta_joint_5",
++            "delta_joint_6",
++            "gripper",
++        ]
++    write_json(info_path, info)
++
++
++def convert_dataset(src: Path, dst: Path, args: argparse.Namespace) -> None:
++    if not src.exists():
++        raise FileNotFoundError(src)
++
++    if dst.exists():
++        if not args.overwrite:
++            raise FileExistsError(f"{dst} already exists; pass --overwrite to replace it")
++        shutil.rmtree(dst)
++
++    copy_dataset_tree(src, dst, args.media_mode)
++
++    action_stats_by_episode = {}
++    max_deltas = []
++    for path in parquet_paths(dst):
++        episode_index, action_stats, max_delta = convert_parquet(path, args.max_abs_delta)
++        action_stats_by_episode[episode_index] = action_stats
++        max_deltas.append(max_delta)
++
++    meta_dir = dst / "meta"
++    meta_dir.mkdir(exist_ok=True)
++    update_episode_stats(meta_dir / "episodes_stats.jsonl", action_stats_by_episode)
++    update_info_json(dst)
++    write_json(meta_dir / "modality.json", DELTA_MODALITY)
++    remove_starvla_caches(meta_dir)
++    write_json(
++        meta_dir / "delta_conversion.json",
++        {
++            "source_dataset": str(src),
++            "formula": "action_delta[t, :7] = action_abs[t + 1, :7] - action_abs[t, :7]; last delta is zero; gripper copied from action_abs[t, 7]",
++            "max_abs_delta_clip": args.max_abs_delta,
++            "media_mode": args.media_mode,
++        },
++    )
++
++    print(
++        f"{src.name}: converted {len(action_stats_by_episode)} episode(s), "
++        f"max |joint delta|={max(max_deltas) if max_deltas else 0.0:.6f}"
++    )
++
++
++def main() -> None:
++    args = parse_args()
++    args.output_root.mkdir(parents=True, exist_ok=True)
++
++    for dataset_name in args.datasets:
++        convert_dataset(
++            args.input_root / dataset_name,
++            args.output_root / dataset_name,
++            args,
++        )
++
++    print(f"Done. Delta datasets are in: {args.output_root}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/crisp_gym/scripts/quest3_stream_adapter.py b/crisp_gym/scripts/quest3_stream_adapter.py
+new file mode 100644
+index 0000000..3d8449a
+--- /dev/null
++++ b/crisp_gym/scripts/quest3_stream_adapter.py
+@@ -0,0 +1,615 @@
++"""Adapt Quest 3 controller pose/buttons to Franka delta end-pose commands.
++
++The Franka recorder already knows how to consume `/phone_pose` and
++`/phone_gripper` through `TeleopStreamedPose`. This adapter keeps the Quest side
++separate from the Franka command path by default: it converts controller deltas
++into a virtual streamed pose, while the recorder/environment still owns robot
++control. It also publishes an explicit 7D delta end-pose action stream and can
++optionally publish absolute `/target_pose` commands for direct
++`cartesian_impedance_controller` bringup.
++"""
++
++from __future__ import annotations
++
++import time
++
++import numpy as np
++import rclpy
++from geometry_msgs.msg import PoseStamped
++from rclpy.executors import ExternalShutdownException
++from rclpy.node import Node
++from scipy.spatial.transform import Rotation
++from sensor_msgs.msg import Joy
++from std_msgs.msg import Float32
++from std_msgs.msg import Float64MultiArray
++from std_msgs.msg import String
++
++
++def _button_pressed(msg: Joy, index: int) -> bool:
++    """Return whether a Joy button is pressed; negative index disables it."""
++    return index >= 0 and index < len(msg.buttons) and msg.buttons[index] == 1
++
++
++def _axis_pressed(msg: Joy, index: int, threshold: float) -> bool:
++    """Return whether a Joy axis crosses the configured threshold."""
++    return index >= 0 and index < len(msg.axes) and msg.axes[index] < threshold
++
++
++def _clip_vector_norm(vector: np.ndarray, max_norm: float) -> np.ndarray:
++    """Clip a vector by total norm while preserving direction."""
++    if max_norm <= 0.0:
++        return np.zeros_like(vector)
++
++    norm = float(np.linalg.norm(vector))
++    if norm <= max_norm or norm == 0.0:
++        return vector
++    return vector * (max_norm / norm)
++
++
++def _parse_axis_selector(selector: str) -> tuple[int, float]:
++    """Parse an axis selector such as x, -y, or z."""
++    cleaned = selector.strip().lower()
++    sign = -1.0 if cleaned.startswith("-") else 1.0
++    axis = cleaned[1:] if cleaned.startswith("-") else cleaned
++    axis_to_index = {"x": 0, "y": 1, "z": 2}
++    if axis not in axis_to_index:
++        raise ValueError(
++            f"Invalid axis selector '{selector}'. Use x, y, z, or a negative axis."
++        )
++    return axis_to_index[axis], sign
++
++
++def _axis_mapping_matrix(selectors: list[str], signs: np.ndarray) -> np.ndarray:
++    """Build a signed permutation matrix from Quest axes to Franka base axes."""
++    matrix = np.zeros((3, 3), dtype=float)
++    for out_axis, selector in enumerate(selectors):
++        in_axis, selector_sign = _parse_axis_selector(selector)
++        matrix[out_axis, in_axis] = selector_sign * signs[out_axis]
++    return matrix
++
++
++def _parse_matrix_param(value: str) -> np.ndarray | None:
++    """Parse a row-major 3x3 matrix from a ROS string parameter."""
++    value = value.strip()
++    if not value:
++        return None
++
++    parts = value.replace(",", " ").split()
++    if len(parts) != 9:
++        raise ValueError(
++            "quest_to_franka_matrix must contain 9 row-major numbers, "
++            f"got {len(parts)} values."
++        )
++    return np.asarray([float(part) for part in parts], dtype=float).reshape(3, 3)
++
++
++def _rotation_from_pose(msg: PoseStamped) -> Rotation | None:
++    """Read a valid scipy rotation from a PoseStamped message."""
++    quat = np.array(
++        [
++            msg.pose.orientation.x,
++            msg.pose.orientation.y,
++            msg.pose.orientation.z,
++            msg.pose.orientation.w,
++        ],
++        dtype=float,
++    )
++    if np.linalg.norm(quat) < 1e-6:
++        return None
++    return Rotation.from_quat(quat)
++
++
++def _pose_to_arrays(msg: PoseStamped) -> tuple[np.ndarray, Rotation | None]:
++    """Read position and orientation from a PoseStamped."""
++    position = np.array(
++        [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z],
++        dtype=float,
++    )
++    return position, _rotation_from_pose(msg)
++
++
++def _rotation_to_action(rotation: Rotation, representation: str) -> np.ndarray:
++    """Convert a delta rotation to the configured action representation."""
++    if representation == "euler_xyz":
++        return rotation.as_euler("xyz")
++    if representation == "rotvec":
++        return rotation.as_rotvec()
++    raise ValueError("rotation_representation must be 'euler_xyz' or 'rotvec'.")
++
++
++class Quest3StreamAdapter(Node):
++    """Convert Quest controller topics into delta end-pose teleop commands."""
++
++    def __init__(self) -> None:
++        super().__init__("quest3_stream_adapter")
++
++        self.declare_parameter("quest_pose_topic", "/quest/right_controller/pose")
++        self.declare_parameter("quest_joy_topic", "/quest/right_controller/joy")
++        self.declare_parameter("output_pose_topic", "/phone_pose")
++        self.declare_parameter("output_gripper_topic", "/phone_gripper")
++        self.declare_parameter(
++            "output_delta_action_topic",
++            "/quest/right_controller/delta_end_pose",
++        )
++        self.declare_parameter("franka_gripper_command_topic", "")
++        self.declare_parameter("publish_target_pose", False)
++        self.declare_parameter("target_pose_topic", "/target_pose")
++        self.declare_parameter("current_pose_topic", "/current_pose")
++        self.declare_parameter("output_frame_id", "quest3_virtual")
++        self.declare_parameter("target_frame_id", "base")
++        self.declare_parameter("deadman_button", 4)
++        self.declare_parameter("deadman_latch_button", -1)
++        self.declare_parameter("reset_button", 0)
++        self.declare_parameter("pause_button", 1)
++        self.declare_parameter("gripper_button", -1)
++        self.declare_parameter("trigger_axis", 5)
++        self.declare_parameter("trigger_threshold", -0.5)
++        self.declare_parameter("gripper_release_delay", 0.25)
++        self.declare_parameter("record_transition_topic", "")
++        self.declare_parameter("record_button", -1)
++        self.declare_parameter("save_button", 0)
++        self.declare_parameter("delete_button", 1)
++        self.declare_parameter("gripper_requires_deadman", True)
++        self.declare_parameter("gripper_open_value", 1.0)
++        self.declare_parameter("gripper_closed_value", 0.0)
++        self.declare_parameter("publish_rate", 30.0)
++        self.declare_parameter("translation_scale", 0.15)
++        self.declare_parameter("x_scale", 1.0)
++        self.declare_parameter("y_scale", 1.0)
++        self.declare_parameter("z_scale", 1.0)
++        self.declare_parameter("rotation_scale", 0.0)
++        self.declare_parameter("rotation_representation", "euler_xyz")
++        self.declare_parameter("max_step", 0.03)
++        self.declare_parameter("max_translation_step", 0.03)
++        self.declare_parameter("max_rotation_step", 0.08)
++        self.declare_parameter("quest_to_franka_matrix", "")
++        self.declare_parameter("x_sign", 1.0)
++        self.declare_parameter("y_sign", 1.0)
++        self.declare_parameter("z_sign", 1.0)
++        self.declare_parameter("x_axis", "x")
++        self.declare_parameter("y_axis", "y")
++        self.declare_parameter("z_axis", "z")
++        self.declare_parameter("roll_sign", 1.0)
++        self.declare_parameter("pitch_sign", 1.0)
++        self.declare_parameter("yaw_sign", 1.0)
++
++        self.quest_pose_topic = str(self.get_parameter("quest_pose_topic").value)
++        self.quest_joy_topic = str(self.get_parameter("quest_joy_topic").value)
++        self.output_pose_topic = str(self.get_parameter("output_pose_topic").value)
++        self.output_gripper_topic = str(
++            self.get_parameter("output_gripper_topic").value
++        )
++        self.output_delta_action_topic = str(
++            self.get_parameter("output_delta_action_topic").value
++        )
++        self.franka_gripper_command_topic = str(
++            self.get_parameter("franka_gripper_command_topic").value
++        )
++        self.publish_target_pose_enabled = bool(
++            self.get_parameter("publish_target_pose").value
++        )
++        self.target_pose_topic = str(self.get_parameter("target_pose_topic").value)
++        self.current_pose_topic = str(self.get_parameter("current_pose_topic").value)
++        self.output_frame_id = str(self.get_parameter("output_frame_id").value)
++        self.target_frame_id = str(self.get_parameter("target_frame_id").value)
++        self.deadman_button = int(self.get_parameter("deadman_button").value)
++        self.deadman_latch_button = int(
++            self.get_parameter("deadman_latch_button").value
++        )
++        self.reset_button = int(self.get_parameter("reset_button").value)
++        self.pause_button = int(self.get_parameter("pause_button").value)
++        self.gripper_button = int(self.get_parameter("gripper_button").value)
++        self.trigger_axis = int(self.get_parameter("trigger_axis").value)
++        self.trigger_threshold = float(self.get_parameter("trigger_threshold").value)
++        self.gripper_release_delay = float(
++            self.get_parameter("gripper_release_delay").value
++        )
++        self.record_transition_topic = str(
++            self.get_parameter("record_transition_topic").value
++        )
++        self.record_button = int(self.get_parameter("record_button").value)
++        self.save_button = int(self.get_parameter("save_button").value)
++        self.delete_button = int(self.get_parameter("delete_button").value)
++        self.gripper_requires_deadman = bool(
++            self.get_parameter("gripper_requires_deadman").value
++        )
++        self.gripper_open_value = float(self.get_parameter("gripper_open_value").value)
++        self.gripper_closed_value = float(
++            self.get_parameter("gripper_closed_value").value
++        )
++        self.translation_scale = float(self.get_parameter("translation_scale").value)
++        self.axis_scale = np.array(
++            [
++                float(self.get_parameter("x_scale").value),
++                float(self.get_parameter("y_scale").value),
++                float(self.get_parameter("z_scale").value),
++            ],
++            dtype=float,
++        )
++        self.rotation_scale = float(self.get_parameter("rotation_scale").value)
++        self.rotation_representation = str(
++            self.get_parameter("rotation_representation").value
++        )
++        _rotation_to_action(Rotation.identity(), self.rotation_representation)
++
++        max_step = float(self.get_parameter("max_step").value)
++        max_translation_step = float(self.get_parameter("max_translation_step").value)
++        if max_step != 0.03 and max_translation_step == 0.03:
++            max_translation_step = max_step
++        self.max_translation_step = max_translation_step
++        self.max_rotation_step = float(self.get_parameter("max_rotation_step").value)
++
++        axis_sign = np.array(
++            [
++                float(self.get_parameter("x_sign").value),
++                float(self.get_parameter("y_sign").value),
++                float(self.get_parameter("z_sign").value),
++            ],
++            dtype=float,
++        )
++        axis_selectors = [
++            str(self.get_parameter("x_axis").value),
++            str(self.get_parameter("y_axis").value),
++            str(self.get_parameter("z_axis").value),
++        ]
++        parsed_matrix = _parse_matrix_param(
++            str(self.get_parameter("quest_to_franka_matrix").value)
++        )
++        self.quest_to_franka = (
++            parsed_matrix
++            if parsed_matrix is not None
++            else _axis_mapping_matrix(axis_selectors, axis_sign)
++        )
++        self.rotation_sign = np.array(
++            [
++                float(self.get_parameter("roll_sign").value),
++                float(self.get_parameter("pitch_sign").value),
++                float(self.get_parameter("yaw_sign").value),
++            ],
++            dtype=float,
++        )
++
++        publish_rate = max(1.0, float(self.get_parameter("publish_rate").value))
++
++        self.pose_pub = self.create_publisher(PoseStamped, self.output_pose_topic, 10)
++        self.gripper_pub = self.create_publisher(Float32, self.output_gripper_topic, 10)
++        self.delta_action_pub = self.create_publisher(
++            Float64MultiArray,
++            self.output_delta_action_topic,
++            10,
++        )
++        self.franka_gripper_pub = (
++            self.create_publisher(
++                Float64MultiArray,
++                self.franka_gripper_command_topic,
++                10,
++            )
++            if self.franka_gripper_command_topic
++            else None
++        )
++        self.record_transition_pub = (
++            self.create_publisher(String, self.record_transition_topic, 10)
++            if self.record_transition_topic
++            else None
++        )
++        self.target_pose_pub = (
++            self.create_publisher(PoseStamped, self.target_pose_topic, 10)
++            if self.publish_target_pose_enabled
++            else None
++        )
++
++        self.enabled = False
++        self.paused = False
++        self.teleop_latched = False
++        self.current_gripper = self.gripper_open_value
++        self.gripper_last_pressed_time = 0.0
++        self.last_raw_pos: np.ndarray | None = None
++        self.last_raw_rot: Rotation | None = None
++        self.virtual_pos = np.zeros(3, dtype=float)
++        self.virtual_rot = Rotation.identity()
++        self.pending_delta_pos = np.zeros(3, dtype=float)
++        self.pending_delta_rot = Rotation.identity()
++        self.target_pos: np.ndarray | None = None
++        self.target_rot: Rotation | None = None
++        self.warned_missing_current_pose = False
++        self.reanchor_requested = False
++        self.reset_button_was_pressed = False
++        self.deadman_latch_was_pressed = False
++        self.record_button_was_pressed = False
++        self.save_button_was_pressed = False
++        self.delete_button_was_pressed = False
++
++        self.create_subscription(PoseStamped, self.quest_pose_topic, self.on_pose, 10)
++        self.create_subscription(Joy, self.quest_joy_topic, self.on_joy, 10)
++        if self.publish_target_pose_enabled:
++            self.create_subscription(
++                PoseStamped,
++                self.current_pose_topic,
++                self.on_current_pose,
++                10,
++            )
++        self.create_timer(1.0 / publish_rate, self.publish_stream)
++
++        self.get_logger().info(f"Quest pose topic: {self.quest_pose_topic}")
++        self.get_logger().info(f"Quest joy topic: {self.quest_joy_topic}")
++        self.get_logger().info(
++            f"Publishing {self.output_pose_topic} and {self.output_gripper_topic}"
++        )
++        self.get_logger().info(
++            "Quest-to-Franka base transform matrix: "
++            f"{np.array2string(self.quest_to_franka, precision=3)}"
++        )
++        self.get_logger().info(
++            "Quest translation scale: "
++            f"{self.translation_scale:.3f}, axis scale: "
++            f"{np.array2string(self.axis_scale, precision=3)}"
++        )
++        self.get_logger().info(
++            "Publishing 7D delta end-pose actions on "
++            f"{self.output_delta_action_topic} as "
++            f"[dx, dy, dz, d{self.rotation_representation}, gripper]"
++        )
++        if self.franka_gripper_pub is not None:
++            self.get_logger().info(
++                f"Publishing Franka gripper commands on {self.franka_gripper_command_topic}"
++            )
++        if self.deadman_latch_button >= 0:
++            self.get_logger().info(
++                "Quest teleop latch enabled: button "
++                f"{self.deadman_latch_button} toggles teleop on/off."
++            )
++        if self.record_transition_pub is not None:
++            self.get_logger().info(
++                "Publishing recording commands on "
++                f"{self.record_transition_topic}: record button={self.record_button}, "
++                f"save button={self.save_button}, delete button={self.delete_button}."
++            )
++        if self.target_pose_pub is not None:
++            self.get_logger().info(
++                f"Publishing absolute target poses on {self.target_pose_topic}; "
++                f"initial target comes from {self.current_pose_topic}. "
++                "Start cartesian_impedance_controller separately and keep other "
++                "target_pose publishers stopped."
++            )
++        if self.rotation_scale == 0.0:
++            self.get_logger().info("Quest orientation streaming is disabled.")
++
++    def on_current_pose(self, msg: PoseStamped) -> None:
++        """Initialize direct target-pose publishing from the robot's current pose."""
++        if self.target_pos is not None and self.target_rot is not None:
++            return
++
++        position, rotation = _pose_to_arrays(msg)
++        if rotation is None:
++            return
++
++        self.target_pos = position
++        self.target_rot = rotation
++        self.get_logger().info("Initialized Quest target_pose from current_pose.")
++
++    def on_joy(self, msg: Joy) -> None:
++        """Handle deadman, reset, pause, and trigger input."""
++        latch_pressed = _button_pressed(msg, self.deadman_latch_button)
++        if latch_pressed and not self.deadman_latch_was_pressed:
++            self.teleop_latched = not self.teleop_latched
++            self.reanchor_requested = self.teleop_latched
++            state = "enabled" if self.teleop_latched else "disabled"
++            self.get_logger().info(f"Quest teleop latch {state}.")
++        self.deadman_latch_was_pressed = latch_pressed
++
++        deadman_pressed = self.deadman_button < 0 or _button_pressed(
++            msg,
++            self.deadman_button,
++        )
++
++        reset_pressed = _button_pressed(msg, self.reset_button)
++        if reset_pressed and not self.reset_button_was_pressed:
++            self.reanchor_requested = True
++            self.get_logger().info("Quest controller re-anchor requested.")
++        self.reset_button_was_pressed = reset_pressed
++
++        if _button_pressed(msg, self.pause_button):
++            self.paused = True
++
++        if self.deadman_latch_button >= 0:
++            self.enabled = self.teleop_latched and not self.paused
++        elif not deadman_pressed:
++            self.enabled = False
++            self.paused = False
++        else:
++            self.enabled = not self.paused
++
++        self._publish_recording_commands(msg)
++
++        control_active = self.enabled if self.deadman_latch_button >= 0 else deadman_pressed
++        if not self.gripper_requires_deadman or control_active:
++            if self.gripper_button >= 0:
++                trigger_pressed = _button_pressed(msg, self.gripper_button)
++            else:
++                trigger_pressed = _axis_pressed(
++                    msg,
++                    self.trigger_axis,
++                    self.trigger_threshold,
++                )
++            now = time.monotonic()
++            if trigger_pressed:
++                self.gripper_last_pressed_time = now
++                gripper_should_close = True
++            else:
++                gripper_should_close = (
++                    now - self.gripper_last_pressed_time
++                ) < self.gripper_release_delay
++            self.current_gripper = (
++                self.gripper_closed_value
++                if gripper_should_close
++                else self.gripper_open_value
++            )
++
++    def _publish_recording_commands(self, msg: Joy) -> None:
++        """Publish ROS recording-manager commands from Quest button edges."""
++        if self.record_transition_pub is None:
++            return
++
++        record_pressed = _button_pressed(msg, self.record_button)
++        if record_pressed != self.record_button_was_pressed:
++            self._publish_record_transition("record")
++        self.record_button_was_pressed = record_pressed
++
++        save_pressed = _button_pressed(msg, self.save_button)
++        if save_pressed and not self.save_button_was_pressed:
++            self._publish_record_transition("save")
++        self.save_button_was_pressed = save_pressed
++
++        delete_pressed = _button_pressed(msg, self.delete_button)
++        if delete_pressed and not self.delete_button_was_pressed:
++            self._publish_record_transition("delete")
++        self.delete_button_was_pressed = delete_pressed
++
++    def _publish_record_transition(self, command: str) -> None:
++        """Publish one recording-manager transition command."""
++        if self.record_transition_pub is None:
++            return
++        msg = String()
++        msg.data = command
++        self.record_transition_pub.publish(msg)
++        self.get_logger().info(f"Quest recording command: {command}")
++
++    def on_pose(self, msg: PoseStamped) -> None:
++        """Accumulate controller motion while the deadman is held."""
++        raw_pos, raw_rot = _pose_to_arrays(msg)
++        if raw_rot is None:
++            raw_rot = (
++                self.last_raw_rot
++                if self.last_raw_rot is not None
++                else Rotation.identity()
++            )
++
++        if self.last_raw_pos is None or self.last_raw_rot is None:
++            self.last_raw_pos = raw_pos
++            self.last_raw_rot = raw_rot
++            return
++
++        if self.reanchor_requested:
++            self.last_raw_pos = raw_pos
++            self.last_raw_rot = raw_rot
++            self.reanchor_requested = False
++            self.get_logger().info(
++                "Quest controller re-anchored without moving robot target."
++            )
++            return
++
++        raw_delta = raw_pos - self.last_raw_pos
++        raw_delta_rot = raw_rot * self.last_raw_rot.inv()
++        self.last_raw_pos = raw_pos
++        self.last_raw_rot = raw_rot
++
++        if not self.enabled:
++            return
++
++        mapped_delta = self.quest_to_franka @ raw_delta
++        scaled_delta = mapped_delta * self.axis_scale * self.translation_scale
++        clipped_delta = _clip_vector_norm(scaled_delta, self.max_translation_step)
++        self.virtual_pos += clipped_delta
++        self.pending_delta_pos += clipped_delta
++
++        delta_rot = Rotation.identity()
++        if self.rotation_scale > 0.0:
++            mapped_rotvec = self.quest_to_franka @ raw_delta_rot.as_rotvec()
++            scaled_rotvec = mapped_rotvec * self.rotation_sign * self.rotation_scale
++            clipped_rotvec = _clip_vector_norm(scaled_rotvec, self.max_rotation_step)
++            delta_rot = Rotation.from_rotvec(clipped_rotvec)
++            self.virtual_rot = delta_rot * self.virtual_rot
++            self.pending_delta_rot = delta_rot * self.pending_delta_rot
++
++        if (
++            self.target_pose_pub is not None
++            and self.target_pos is not None
++            and self.target_rot is not None
++        ):
++            self.target_pos = self.target_pos + clipped_delta
++            self.target_rot = delta_rot * self.target_rot
++
++    def publish_stream(self) -> None:
++        """Publish the virtual teleop pose, delta action, and gripper state."""
++        stamp = self.get_clock().now().to_msg()
++
++        pose_msg = PoseStamped()
++        pose_msg.header.stamp = stamp
++        pose_msg.header.frame_id = self.output_frame_id
++        pose_msg.pose.position.x = float(self.virtual_pos[0])
++        pose_msg.pose.position.y = float(self.virtual_pos[1])
++        pose_msg.pose.position.z = float(self.virtual_pos[2])
++        quat = self.virtual_rot.as_quat()
++        pose_msg.pose.orientation.x = float(quat[0])
++        pose_msg.pose.orientation.y = float(quat[1])
++        pose_msg.pose.orientation.z = float(quat[2])
++        pose_msg.pose.orientation.w = float(quat[3])
++        self.pose_pub.publish(pose_msg)
++
++        gripper_msg = Float32()
++        gripper_msg.data = float(self.current_gripper)
++        self.gripper_pub.publish(gripper_msg)
++
++        rot_action = _rotation_to_action(
++            self.pending_delta_rot,
++            self.rotation_representation,
++        )
++        delta_action_msg = Float64MultiArray()
++        delta_action_msg.data = [
++            float(self.pending_delta_pos[0]),
++            float(self.pending_delta_pos[1]),
++            float(self.pending_delta_pos[2]),
++            float(rot_action[0]),
++            float(rot_action[1]),
++            float(rot_action[2]),
++            float(self.current_gripper),
++        ]
++        self.delta_action_pub.publish(delta_action_msg)
++        self.pending_delta_pos = np.zeros(3, dtype=float)
++        self.pending_delta_rot = Rotation.identity()
++
++        if self.franka_gripper_pub is not None:
++            franka_gripper_msg = Float64MultiArray()
++            franka_gripper_msg.data = [float(self.current_gripper)]
++            self.franka_gripper_pub.publish(franka_gripper_msg)
++
++        if self.target_pose_pub is None:
++            return
++
++        if self.target_pos is None or self.target_rot is None:
++            if not self.warned_missing_current_pose:
++                self.get_logger().warning(
++                    "Waiting for current_pose before publishing target_pose."
++                )
++                self.warned_missing_current_pose = True
++            return
++
++        target_pose_msg = PoseStamped()
++        target_pose_msg.header.stamp = stamp
++        target_pose_msg.header.frame_id = self.target_frame_id
++        target_pose_msg.pose.position.x = float(self.target_pos[0])
++        target_pose_msg.pose.position.y = float(self.target_pos[1])
++        target_pose_msg.pose.position.z = float(self.target_pos[2])
++        target_quat = self.target_rot.as_quat()
++        target_pose_msg.pose.orientation.x = float(target_quat[0])
++        target_pose_msg.pose.orientation.y = float(target_quat[1])
++        target_pose_msg.pose.orientation.z = float(target_quat[2])
++        target_pose_msg.pose.orientation.w = float(target_quat[3])
++        self.target_pose_pub.publish(target_pose_msg)
++
++
++def main() -> None:
++    rclpy.init()
++    node = Quest3StreamAdapter()
++    try:
++        rclpy.spin(node)
++    except (KeyboardInterrupt, ExternalShutdownException):
++        pass
++    finally:
++        node.destroy_node()
++        if rclpy.ok():
++            rclpy.shutdown()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/crisp_gym/scripts/record_lerobot_format_leader_follower copy.py b/crisp_gym/scripts/record_lerobot_format_leader_follower copy.py
+new file mode 100644
+index 0000000..ac25881
+--- /dev/null
++++ b/crisp_gym/scripts/record_lerobot_format_leader_follower copy.py	
+@@ -0,0 +1,316 @@
++"""Script showcasing how to record data in Lerobot Format."""
++
++import argparse
++import json
++import logging
++
++import numpy as np
++import rclpy
++
++import crisp_gym  # noqa: F401
++from crisp_gym.config.home import HomeConfig
++from crisp_gym.envs.manipulator_env import ManipulatorCartesianEnv, make_env
++from crisp_gym.envs.manipulator_env_config import list_env_configs
++from crisp_gym.record.record_functions import make_teleop_fn, make_teleop_streamer_fn
++from crisp_gym.record.recording_manager import make_recording_manager
++from crisp_gym.teleop.teleop_robot import TeleopRobot, make_leader
++from crisp_gym.teleop.teleop_robot_config import list_leader_configs
++from crisp_gym.teleop.teleop_sensor_stream import TeleopStreamedPose
++from crisp_gym.util import prompt
++from crisp_gym.util.lerobot_features import get_features
++from crisp_gym.util.setup_logger import setup_logging
++
++
++def main():
++    """Record data in Lerobot Format using a leader-follower teleoperation setup."""
++    parser = argparse.ArgumentParser(description="Record data in Lerobot Format")
++    parser.add_argument(
++        "--repo-id",
++        type=str,
++        default="test",
++        help="Repository ID for the dataset",
++    )
++    parser.add_argument(
++        "--tasks",
++        type=str,
++        nargs="+",
++        default=["pick the lego block."],
++        help="List of task descriptions to record data for, e.g. 'clean red' 'clean green'",
++    )
++    parser.add_argument(
++        "--robot-type",
++        type=str,
++        default="franka",
++        help="Type of robot being used.",
++    )
++    parser.add_argument(
++        "--fps",
++        type=int,
++        default=15,
++        help="Frames per second for recording",
++    )
++    parser.add_argument(
++        "--num-episodes",
++        type=int,
++        default=10,
++        help="Number of episodes to record",
++    )
++    parser.add_argument(
++        "--resume",
++        action="store_true",
++        default=False,
++        help="Resume recording of an already existing dataset",
++    )
++    parser.add_argument(
++        "--push-to-hub",
++        action=argparse.BooleanOptionalAction,
++        default=True,
++        help="Whether to push the dataset to the Hugging Face Hub.",
++    )
++    parser.add_argument(
++        "--recording-manager-type",
++        type=str,
++        default="keyboard",
++        help="Type of recording manager to use. Currently only 'keyboard' and 'ros' are supported.",
++    )
++    parser.add_argument(
++        "--leader-config",
++        type=str,
++        default=None,
++        help="Configuration name for the leader robot. You can define your own configurations, please check https://utiasdsl.github.io/crisp_controllers/misc/create_own_config/.",
++    )
++    parser.add_argument(
++        "--follower-config",
++        type=str,
++        default=None,
++        help="Configuration name for the follower robot. You can define your own configurations, please check https://utiasdsl.github.io/crisp_controllers/misc/create_own_config/.",
++    )
++    parser.add_argument(
++        "--follower-namespace",
++        type=str,
++        default=None,
++        help="Namespace for the follower robot. This is used to identify the robot in the ROS ecosystem.",
++    )
++    parser.add_argument(
++        "--leader-namespace",
++        type=str,
++        default=None,
++        help="Namespace for the leader robot. This is used to identify the robot in the ROS ecosystem.",
++    )
++    parser.add_argument(
++        "--joint-control",
++        action="store_true",
++        help="Whether to use joint control for the robot.",
++    )
++    parser.add_argument(
++        "--log-level",
++        type=str,
++        default="INFO",
++        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
++        help="Set the logger level.",
++    )
++
++    parser.add_argument(
++        "--use-streamed-teleop",
++        action="store_true",
++        help="Whether to use streamed teleop (e.g., from a phone or VR device) for the leader robot.",
++    )
++    parser.add_argument(
++        "--home-config-noise",
++        type=float,
++        default=0.0,
++        help="Noise to add to the home configuration when homing the robots to randomize the position a bit.",
++    )
++
++    args = parser.parse_args()
++
++    # Set up logger
++    logger = logging.getLogger(__name__)
++    setup_logging(level=args.log_level)
++
++    logger.info("Arguments:")
++    for arg, value in vars(args).items():
++        logger.info(f"{arg:<30}: {value}")
++
++    # Validate arguments not passed by the user
++    if args.follower_namespace is None:
++        args.follower_namespace = prompt.prompt(
++            "Please enter the follower robot namespace (e.g., 'left', 'right', ...)",
++            default="right",
++        )
++        logger.info(f"Using follower namespace: {args.follower_namespace}")
++
++    if args.leader_namespace is None and not args.use_streamed_teleop:
++        args.leader_namespace = prompt.prompt(
++            "Please enter the leader robot namespace (e.g., 'left', 'right', ...)",
++            default="left",
++        )
++        logger.info(f"Using leader namespace: {args.leader_namespace}")
++
++    if args.leader_config is None and not args.use_streamed_teleop:
++        leader_configs = list_leader_configs()
++        args.leader_config = prompt.prompt(
++            "Please enter the leader robot configuration name.",
++            options=leader_configs,
++            default=leader_configs[0],
++        )
++        logger.info(f"Using leader configuration: {args.leader_config}")
++
++    if args.follower_config is None:
++        follower_configs = list_env_configs()
++        args.follower_config = prompt.prompt(
++            "Please enter the follower robot configuration name.",
++            options=follower_configs,
++            default=follower_configs[0],
++        )
++        logger.info(f"Using follower configuration: {args.follower_config}")
++
++    try:
++        ctrl_type = "cartesian" if not args.joint_control else "joint"
++
++        env = make_env(
++            env_type=args.follower_config,
++            control_type=ctrl_type,
++            namespace=args.follower_namespace,
++        )
++
++        leader: TeleopRobot | TeleopStreamedPose | None = None
++        if args.use_streamed_teleop:
++            leader = TeleopStreamedPose()
++            logger.info("Using streamed teleop for the leader robot.")
++        else:
++            leader = make_leader(args.leader_config, namespace=args.leader_namespace)
++            leader.wait_until_ready()
++            logger.info("Using teleop robot for the leader robot. Leader is ready.")
++
++        keys_to_ignore = []
++        features = get_features(env=env, ignore_keys=keys_to_ignore)
++        logger.debug(f"Using the features: {features}")
++
++        if args.use_streamed_teleop and ctrl_type != "cartesian":
++            raise ValueError(
++                "Streamed teleop is only compatible with Cartesian control. Please disable joint control."
++            )
++
++        recording_manager = make_recording_manager(
++            recording_manager_type=args.recording_manager_type,
++            features=features,
++            repo_id=args.repo_id,
++            robot_type=args.robot_type,
++            num_episodes=args.num_episodes,
++            fps=args.fps,
++            resume=args.resume,
++            push_to_hub=args.push_to_hub,
++        )
++        recording_manager.wait_until_ready()
++        logger.info("Recording manager is ready.")
++
++        env_metadata = env.get_metadata()
++
++        with open(recording_manager.dataset_directory / "meta" / "crisp_meta.json", "w") as f:
++            json.dump(env_metadata, f, indent=4)
++
++        logger.info(
++            f"Environment metadata saved to {recording_manager.dataset_directory / 'meta' / 'crisp_meta.json'}"
++        )
++
++        logger.info("Homing both robots before starting with recording.")
++
++        # Prepare environment and leader
++        if isinstance(leader, TeleopRobot):
++            leader.prepare_for_teleop()
++
++        env.wait_until_ready()
++        env.home(home_config=HomeConfig.CLOSE_TO_TABLE.randomize(noise=args.home_config_noise))
++        env.reset()
++
++        tasks = list(args.tasks)
++
++        def on_start():
++            """Hook function to be called when starting a new episode."""
++            env.robot.reset_targets()
++            env.reset()
++
++            if isinstance(leader, TeleopRobot):
++                # TODO: @danielsanjosepro: allow user to change controllers based on config
++
++                leader.robot.reset_targets()
++                leader.robot.cartesian_controller_parameters_client.load_param_config(
++                    leader.config.gravity_compensation_controller
++                )
++                leader.robot.controller_switcher_client.switch_controller(
++                    "cartesian_impedance_controller"
++                )
++
++                if leader.gripper is not None:
++                    leader.gripper.disable_torque()
++
++        def on_end():
++            """Hook function to be called when stopping the recording."""
++            env.robot.reset_targets()
++            random_home = HomeConfig.CLOSE_TO_TABLE.randomize(noise=args.home_config_noise)
++            env.robot.home(blocking=False, home_config=random_home)
++            if isinstance(leader, TeleopRobot):
++                leader.robot.reset_targets()
++                # Activate incase leader should go to the same position as the follower
++                # leader.robot.home(blocking=False, home_config=random_home)
++                leader.robot.home(blocking=False)
++            env.gripper.open()
++
++        with recording_manager:
++            while not recording_manager.done():
++                logger.info(
++                    f"→ Episode {recording_manager.episode_count + 1} / {recording_manager.num_episodes}"
++                )
++
++                # Create a new teleop function for each episode to reset internal variables
++                teleop_fn = None
++                if isinstance(leader, TeleopRobot):
++                    teleop_fn = make_teleop_fn(env, leader)
++                elif isinstance(leader, TeleopStreamedPose) and isinstance(
++                    env, ManipulatorCartesianEnv
++                ):
++                    teleop_fn = make_teleop_streamer_fn(env, leader)
++                else:
++                    raise ValueError(
++                        "Streamed teleop is only compatible with Cartesian control. Please disable joint control."
++                    )
++
++                task = tasks[np.random.randint(0, len(tasks))] if tasks else "No task specified."
++                logger.info(f"▷ Task: {task}")
++
++                recording_manager.record_episode(
++                    data_fn=teleop_fn,
++                    task=task,
++                    on_start=on_start,
++                    on_end=on_end,
++                )
++
++        if isinstance(leader, TeleopRobot):
++            logger.info("Homing leader.")
++            leader.robot.home()
++        logger.info("Homing follower.")
++        env.home()
++
++        logger.info("Closing the environment.")
++        env.close()
++
++        logger.info("Finished recording.")
++
++    except TimeoutError as e:
++        logger.exception(f"Timeout error occurred during recording: {e}.")
++        logger.error(
++            "Please check if the robot container is running and the namespace is correct."
++            "\nYou can check the topics using `ros2 topic list` command."
++        )
++
++    except Exception as e:
++        logger.exception(f"An error occurred during recording: {e}.")
++
++    finally:
++        if rclpy.ok():
++            rclpy.shutdown()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/crisp_gym/teleop/teleop_robot_servo.py b/crisp_gym/teleop/teleop_robot_servo.py
+new file mode 100644
+index 0000000..0e2ad38
+--- /dev/null
++++ b/crisp_gym/teleop/teleop_robot_servo.py
+@@ -0,0 +1,304 @@
++"""ROS2 joint-control teleop node with internal spin thread."""
++
++import threading
++
++import numpy as np
++import rclpy
++import rclpy.executors
++from rclpy.node import Node
++from scipy.spatial.transform import Rotation as R
++from std_msgs.msg import Float64MultiArray
++from crisp_py.gripper.gripper import make_gripper
++from crisp_py.robot import make_robot
++from crisp_py.utils.geometry import Pose
++from crisp_py.robot import Robot
++from crisp_py.utils.geometry import OrientationRepresentation
++from crisp_py.gripper import Gripper, GripperConfig
++from rclpy.callback_groups import ReentrantCallbackGroup
++from rclpy.qos import qos_profile_sensor_data
++
++import time
++class JointControlNode(Node):
++    def __init__(self, robot: Robot | None = None, gripper: Gripper | None = None):
++        super().__init__('joint_control_node')
++        self.robot = robot if robot is not None else make_robot("fr3")
++        self.robot.wait_until_ready()
++        self.home_config: list =  [
++                0,
++                - 8 * np.pi / 16,
++                0,
++                -15 * np.pi / 16,
++                0,
++                6 * np.pi / 8,
++                np.pi / 4,
++            ]
++        if robot is None:
++            self.robot.home(home_config=self.home_config)
++        # Do not call ControllerSwitcherClient here. On the real Franka setup,
++        # /controller_manager/list_controllers can stop responding while the
++        # arm topics are still healthy, and the switch helper waits forever.
++        # The controller launch should prepare joint_impedance_controller before
++        # leader-arm teleop starts.
++        self.get_logger().info(
++            "Skipping blocking controller switch; assuming joint_impedance_controller "
++            "is already ready for /target_joint."
++        )
++        self.gripper = gripper if gripper is not None else make_gripper("gripper_franka")
++        # config = GripperConfig(
++        # min_value=1046.0, 
++        # max_value=2065.0, 
++        # joint_state_topic="/gripper/joint_states",
++        # command_topic="/gripper/gripper_position_controller/commands",
++        # # enable_torque_service="TODO/set_torque",
++        # )
++        # self.gripper = Gripper(gripper_config=config)
++        if self.gripper is not None:
++            self.gripper.wait_until_ready()
++
++        # self.gripper.wait_until_ready()
++        # self.gripper.config.min_value=0.1046
++        # self.gripper.config.max_value=0.2065
++
++        # self.gripper.config.min_delta = 0.0
++        if self.gripper is not None:
++            self.gripper.config.max_delta = 1.0
++            self.gripper.set_target(1.0)
++        self.gripper_command_publisher = self.create_publisher(
++            Float64MultiArray,
++            "/gripper/gripper_position_controller/commands",
++            10,
++        )
++        self._last_gripper = 1.0
++        # 记录初始角度（零点）
++        self.initial_angles = None
++        self.first_frame = True
++        self.subscription = self.create_subscription(
++            Float64MultiArray,
++            "servo_angles",
++            self.listener_callback,
++            10,
++        )
++        self.prev_angles = None
++        self.filtered_angles = None
++        self.home_joint_values = self.robot.joint_values
++        self.filtered_joint_target = None
++        self.commanded_joint_velocity = None
++        self.target_joint = None
++        self.command_period = 0.01
++        self.max_joint_velocity = 0.8
++        self.max_joint_acceleration = 1.2
++        self.angle_smoothing_alpha = 0.45
++        self.angle_deadband_deg = 0.02
++        self.joint_target_tolerance = 0.002
++        self._last_pose: Pose | None = None
++        self._last_gripper: float | None = 1.0
++        self.last_action = None
++        # 标记节点是否运行
++        self.is_running = True
++        self.current_gripper_state = None  # 记录当前夹爪状态：0=关闭，1=打开
++        self.gripper_settle_time = 0.1     # 夹爪执行稳定时间（秒）
++        self.last_gripper_cmd_time = 0     # 上次发送夹爪指令的时间
++        self.pending_gripper_target = None
++        self.pending_gripper_until = 0.0
++        self.last_end_pose = None
++        self._executor = rclpy.executors.MultiThreadedExecutor(num_threads=2)
++        self._executor.add_node(self)
++        self._spin_thread = threading.Thread(target=self._spin_node, daemon=True)
++        self._spin_thread.start()
++        self.command_timer = self.create_timer(self.command_period, self._publish_joint_target)
++
++    def _spin_node(self):
++        while rclpy.ok() and self.is_running:
++            self._executor.spin_once(timeout_sec=0.1)
++
++    @property
++    def last_pose(self) -> Pose:
++        """Get the last received pose.
++
++        Returns:
++            Pose | None: The last received pose or None if no pose has been received yet.
++        """
++        if self._last_pose is None:
++            raise RuntimeError(
++                f"No pose received yet. Is the teleop device running? Check with 'ros2 topic echo {self._pose_topic}'"
++            )
++        return self._last_pose
++    @property
++    def last_gripper(self) -> float:
++        """Get the last received gripper value.
++
++        Returns:
++            float | None: The last received gripper value or None if no gripper value has been received yet.
++        """
++        if self._last_gripper is None:
++            raise RuntimeError("No gripper value received yet. Is the teleop device running?")
++        return self._last_gripper
++    
++    def listener_callback(self, msg):
++        self._last_pose = self.robot.end_effector_pose
++        if len(msg.data) < 8:
++            self.get_logger().warn(
++                f"Skipping /servo_angles message with {len(msg.data)} values; expected 8."
++            )
++            return
++
++        angles = np.asarray(msg.data[:7], dtype=float)
++        gripper = msg.data[-1]
++        current_time = time.time()
++        target_gripper = 0.0 if gripper >= 300 else 1.0
++        # 处理夹爪
++        if (self.current_gripper_state != target_gripper and
++            current_time - self.last_gripper_cmd_time > self.gripper_settle_time):
++            if target_gripper == 0.0:
++                print("Close gripper (stable)")
++                if self.gripper is not None:
++                    self.gripper.set_target(0.0)
++                self._publish_gripper_command(0.0)
++                self._last_gripper = 0.0
++            else:
++                print("Open gripper (stable)")
++                if self.gripper is not None:
++                    self.gripper.set_target(1.0)
++                self._publish_gripper_command(1.0)
++                self._last_gripper = 1.0
++            
++            # 更新状态和时间戳
++            self.current_gripper_state = target_gripper
++            self.last_gripper_cmd_time = current_time
++        
++        if self.first_frame:
++            self.initial_angles = angles.copy()
++            self.filtered_angles = angles.copy()
++            self.first_frame = False
++            self.prev_angles = angles.copy()
++            return
++
++        self.filtered_angles += self.angle_smoothing_alpha * (angles - self.filtered_angles)
++        angle_delta = self.filtered_angles - self.initial_angles
++        angle_delta[np.abs(angle_delta) < self.angle_deadband_deg] = 0.0
++        angle_delta_rad = np.deg2rad(angle_delta)
++        angle_delta_rad[3] *= -1
++
++        home_joint_values = np.asarray(self.home_joint_values, dtype=float).reshape(-1)
++        if home_joint_values.shape[0] != 7:
++            self.get_logger().warn(
++                f"Skipping servo target because home_joint_values has shape "
++                f"{home_joint_values.shape}; expected 7 joints."
++            )
++            self.reset()
++            return
++
++        self.target_joint = home_joint_values + angle_delta_rad
++        self.prev_angles = angles.copy()
++        self.last_action = np.concatenate(
++            [np.asarray(self.target_joint, dtype=float).reshape(-1), [self._last_gripper]]
++        )
++
++        self.last_end_pose = self.robot.end_effector_pose
++        # self.get_logger().info(f'Target joint: {q_new}')
++
++    def _publish_gripper_command(self, target: float):
++        msg = Float64MultiArray()
++        msg.data = [float(target)]
++        self.gripper_command_publisher.publish(msg)
++        self.pending_gripper_target = float(target)
++        self.pending_gripper_until = time.time() + 1.0
++        self.get_logger().info(f"Published gripper command: {target}")
++
++    def _publish_joint_target(self):
++        if (
++            self.pending_gripper_target is not None
++            and time.time() < self.pending_gripper_until
++        ):
++            msg = Float64MultiArray()
++            msg.data = [self.pending_gripper_target]
++            self.gripper_command_publisher.publish(msg)
++
++        if self.target_joint is None:
++            return
++        if self.filtered_joint_target is None:
++            joint_values = np.asarray(self.robot.joint_values, dtype=float).reshape(-1)
++            if joint_values.shape[0] != 7:
++                self.get_logger().warn(
++                    f"Skipping joint target publish because robot.joint_values has shape "
++                    f"{joint_values.shape}; expected 7 joints."
++                )
++                return
++            self.filtered_joint_target = joint_values.copy()
++        if self.commanded_joint_velocity is None:
++            self.commanded_joint_velocity = np.zeros_like(self.filtered_joint_target)
++
++        position_error = self.target_joint - self.filtered_joint_target
++        close_to_target = np.abs(position_error) < self.joint_target_tolerance
++        if np.all(close_to_target):
++            self.commanded_joint_velocity[:] = 0.0
++            self.filtered_joint_target = self.target_joint.copy()
++            self.robot.set_target_joint(self.filtered_joint_target)
++            self.last_action = np.concatenate(
++                [np.asarray(self.filtered_joint_target, dtype=float).reshape(-1), [self._last_gripper]]
++            )
++            return
++
++        braking_velocity = np.sqrt(2.0 * self.max_joint_acceleration * np.abs(position_error))
++        desired_velocity = np.sign(position_error) * np.minimum(
++            self.max_joint_velocity,
++            braking_velocity,
++        )
++        desired_velocity[close_to_target] = 0.0
++        max_velocity_delta = self.max_joint_acceleration * self.command_period
++        velocity_delta = np.clip(
++            desired_velocity - self.commanded_joint_velocity,
++            -max_velocity_delta,
++            max_velocity_delta,
++        )
++        self.commanded_joint_velocity += velocity_delta
++        step = self.commanded_joint_velocity * self.command_period
++        overshoot = np.abs(step) > np.abs(position_error)
++        step[overshoot] = position_error[overshoot]
++        self.filtered_joint_target += step
++        self.robot.set_target_joint(self.filtered_joint_target)
++        self.last_action = np.concatenate(
++            [np.asarray(self.filtered_joint_target, dtype=float).reshape(-1), [self._last_gripper]]
++        )
++
++    def reset(self):
++        """Reset the internal state of the teleop node."""
++        self.first_frame = True
++        self.initial_angles = None
++        self.prev_angles = None
++        self.filtered_angles = None
++        self.last_action = None
++        joint_values = np.asarray(self.robot.joint_values, dtype=float).reshape(-1)
++        if joint_values.shape[0] != 7:
++            self.get_logger().warn(
++                f"Cannot reset servo teleop from robot.joint_values with shape "
++                f"{joint_values.shape}; keeping previous home joint values."
++            )
++            self.filtered_joint_target = None
++            self.commanded_joint_velocity = None
++            self.target_joint = None
++            return
++        self.home_joint_values = joint_values
++        self.filtered_joint_target = self.home_joint_values.copy()
++        self.commanded_joint_velocity = np.zeros_like(self.home_joint_values)
++        self.target_joint = None
++
++    def prepare_for_teleop(self, home: bool = True):
++        """Prepare the follower robot for servo-angle joint teleoperation."""
++        self.robot.reset_targets()
++        if home:
++            self.robot.home(home_config=self.home_config)
++        # Avoid blocking on /controller_manager/list_controllers here. The real
++        # Franka setup can have healthy /joint_states and /target_joint topics
++        # while the controller manager service call does not return.
++        self.get_logger().info(
++            "Skipping blocking controller switch in prepare_for_teleop; "
++            "using the current /target_joint subscriber setup."
++        )
++        self.reset()
++
++    def stop(self):
++        """停止节点并清理资源"""
++        self.is_running = False
++        self._executor.shutdown()
++        self.destroy_node()
+diff --git a/tests/test_streamed_gripper_feedback.py b/tests/test_streamed_gripper_feedback.py
+new file mode 100644
+index 0000000..81fc470
+--- /dev/null
++++ b/tests/test_streamed_gripper_feedback.py
+@@ -0,0 +1,93 @@
++"""Regression tests for externally controlled streamed gripper recording."""
++
++from types import SimpleNamespace
++from unittest.mock import Mock
++
++import numpy as np
++from crisp_py.utils.geometry import Pose
++from scipy.spatial.transform import Rotation
++
++from crisp_gym.envs.manipulator_env import ManipulatorBaseEnv, ManipulatorCartesianEnv
++from crisp_gym.envs.manipulator_env_config import ObservationKeys
++from crisp_gym.record.record_functions import make_teleop_streamer_fn
++from crisp_gym.util.gripper_mode import GripperMode
++
++
++class _CartesianStepHarness(ManipulatorCartesianEnv):
++    def __init__(self) -> None:
++        self.action_space = SimpleNamespace(shape=(7,))
++        self.config = SimpleNamespace(
++            use_relative_actions=True,
++            gripper_mode=GripperMode.ABSOLUTE_CONTINUOUS,
++            max_episode_steps=None,
++        )
++        self.robot = SimpleNamespace(
++            target_pose=Pose(np.zeros(3), Rotation.identity()),
++            set_target=Mock(),
++        )
++        self.timestep = 0
++        self._set_gripper_action = Mock()
++
++    @staticmethod
++    def action_to_rotation(action: np.ndarray) -> Rotation:
++        return Rotation.from_rotvec(action)
++
++    @staticmethod
++    def clip_position_for_safety(position: np.ndarray) -> np.ndarray:
++        return position
++
++    @staticmethod
++    def _get_obs() -> dict:
++        return {ObservationKeys.GRIPPER_OBS: np.array([0.25], dtype=np.float32)}
++
++
++def test_step_can_skip_command_without_disabling_feedback() -> None:
++    """Skipping commands must not switch off observation feedback."""
++    env = _CartesianStepHarness()
++    action = np.zeros(7, dtype=np.float32)
++
++    obs, *_ = env.step(action, block=False, control_gripper=False)
++
++    env._set_gripper_action.assert_not_called()
++    assert env.config.gripper_mode == GripperMode.ABSOLUTE_CONTINUOUS
++    np.testing.assert_array_equal(obs[ObservationKeys.GRIPPER_OBS], [0.25])
++
++
++def test_base_observation_reads_physical_gripper_feedback() -> None:
++    """The gripper observation must reflect physical joint feedback."""
++    env = object.__new__(ManipulatorBaseEnv)
++    env.config = SimpleNamespace(
++        gripper_mode=GripperMode.ABSOLUTE_CONTINUOUS,
++        observations_to_include_to_state=[ObservationKeys.GRIPPER_OBS],
++    )
++    env.robot = SimpleNamespace(
++        end_effector_pose=Pose(np.zeros(3), Rotation.identity()),
++    )
++    env.gripper = SimpleNamespace(value=0.25)
++    env.cameras = []
++    env.sensors = []
++    env.rotation_to_representation = lambda rotation: rotation.as_rotvec()
++
++    obs = ManipulatorBaseEnv._get_obs(env)
++
++    # The environment stores gripper closure: open=0, closed=1.
++    np.testing.assert_array_equal(obs[ObservationKeys.GRIPPER_OBS], [0.75])
++
++
++def test_streamer_forwards_external_control_flag() -> None:
++    """Streamed recording must forward the external-control setting."""
++    env = SimpleNamespace(
++        rotation_to_representation=lambda rotation: rotation.as_rotvec(),
++        step=Mock(return_value=({}, 0.0, False, False, {})),
++    )
++    leader = SimpleNamespace(
++        last_pose=Pose(np.zeros(3), Rotation.identity()),
++        last_gripper=0.0,
++    )
++    teleop_fn = make_teleop_streamer_fn(env, leader, control_gripper=False)
++
++    assert teleop_fn() == (None, None)
++    leader.last_pose = Pose(np.array([0.01, 0.0, 0.0]), Rotation.identity())
++    teleop_fn()
++
++    assert env.step.call_args.kwargs == {"block": False, "control_gripper": False}

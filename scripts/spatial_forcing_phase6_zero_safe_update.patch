@@ -1,0 +1,49 @@
+diff --git a/starVLA/training/train_starvla.py b/starVLA/training/train_starvla.py
+--- a/starVLA/training/train_starvla.py
++++ b/starVLA/training/train_starvla.py
+@@ -404,6 +404,11 @@ class VLATrainer(TrainerUtils):
+         with self.accelerator.accumulate(self.model):
+             self.optimizer.zero_grad()
+ 
++            unwrapped_model = self.accelerator.unwrap_model(self.model)
++            parameter_snapshot = None
++            if hasattr(unwrapped_model, "capture_spatial_forcing_parameter_snapshot"):
++                parameter_snapshot = unwrapped_model.capture_spatial_forcing_parameter_snapshot()
++
+             with torch.autocast("cuda", dtype=torch.bfloat16):
+                 output_dict = self.model.forward(batch_vla)
+                 action_loss = output_dict["action_loss"]
+@@ -414,11 +419,6 @@ class VLATrainer(TrainerUtils):
+ 
+             self.accelerator.backward(total_loss)
+ 
+-            gradient_metrics = {}
+-            unwrapped_model = self.accelerator.unwrap_model(self.model)
+-            if hasattr(unwrapped_model, "spatial_forcing_gradient_metrics"):
+-                gradient_metrics = unwrapped_model.spatial_forcing_gradient_metrics()
+-
+             if self.config.trainer.gradient_clipping is not None:
+                 self.accelerator.clip_grad_norm_(self.model.parameters(), self.config.trainer.gradient_clipping)
+ 
+@@ -432,6 +432,12 @@ class VLATrainer(TrainerUtils):
+             if self.accelerator.sync_gradients:
+                 self.lr_scheduler.step()
+ 
++            parameter_update_metrics = {}
++            if parameter_snapshot is not None:
++                parameter_update_metrics = unwrapped_model.spatial_forcing_parameter_update_metrics(
++                    parameter_snapshot
++                )
++
+         metrics = {
+             "action_dit_loss": action_loss.item(),
+             "total_loss": total_loss.item(),
+@@ -439,7 +445,7 @@ class VLATrainer(TrainerUtils):
+         for key in ("alignment_loss", "weighted_alignment_loss"):
+             if key in output_dict:
+                 metrics[key] = output_dict[key].item()
+-        metrics.update(gradient_metrics)
++        metrics.update(parameter_update_metrics)
+         return metrics
+ 
+     def _finalize_training(self):

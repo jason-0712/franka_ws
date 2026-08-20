@@ -1,0 +1,54 @@
+# Local Python / ROS build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+.venvs/
+.audit-venv/
+
+# ROS / colcon generated folders
+build/
+install/
+log/
+src/**/build/
+src/**/install/
+src/**/log/
+
+# Android / Gradle generated folders
+.gradle/
+.cxx/
+src/**/.gradle/
+src/**/.cxx/
+src/**/app/build/
+
+# Large datasets and generated media
+dataset/
+artifacts/
+camera_checks/
+camera_frames_current/
+deployment_logs/
+*.bag
+*.db3
+*.mcap
+*.mp4
+*.avi
+*.mov
+*.parquet
+*.npy
+*.npz
+
+# Large bundles / Docker image exports
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# Local scratch files
+.agents/
+.codex/
+1
+*.bak
+* copy*

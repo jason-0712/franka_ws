@@ -1,0 +1,824 @@
+# 7.16 Summary
+
+日期：2026-07-16
+
+今天主要目标是检查 StarVLA + Quest3 + Franka 项目里是否存在训练/测试不一致或工程 bug，因为导师提到“如果训测一致没有 bug 的话，按这个操作不应该这么离谱”。今天从数据、registry、dataloader、训练配置、open-loop evaluation、policy server、真机 deployment client、ROS topic 冲突等多个层面做了详细排查，并做了多轮训练和 open-loop 对比。
+
+## 1. 今日核心结论
+
+目前可以确定：
+
+1. 不是单纯“模型太差”，工程链路里确实存在几个会影响结果的 bug/坑。
+2. 数据本身的 action 语义基本是干净的：parquet action 与 `observation.state.target` 的逐帧 target diff 在平移上高度一致。
+3. StarVLA 主训练/eval/preprocess 链路不是完全坏的，因为 single-episode overfit 在提高 LR 后可以明显学到。
+4. 目前最好的模型是：
+
+```text
+quest3_franka_delta_eef_qwenbase_100eps_lr3e5_5k_cont_lr1e5_3k
+```
+
+checkpoint:
+
+```text
+/home/hanyu/starVLA/results/Checkpoints/quest3_franka_delta_eef_qwenbase_100eps_lr3e5_5k_cont_lr1e5_3k/final_model/pytorch_model.pt
+```
+
+它不是从 LIBERO resume，而是：
+
+```text
+Qwen base -> lr 3e-5 train 5k -> lr 1e-5 continue train 3k
+```
+
+5. 当前模型 open-loop 比之前明显改善，但真机仍不能直接完整 deploy。主要问题仍然是：
+   - approach 到 cube 时仍可能越过 cube；
+   - gripper open/close phase 不稳定；
+   - post-grasp 没有稳定 lift/place 行为；
+   - lateral y 幅度仍偏小。
+
+## 2. 今天发现并修复的工程问题
+
+### 2.1 StarVLA registry 不能稳定发现 Franka config
+
+原始 registry 只扫描：
+
+```text
+examples/*/train_files/data_registry
+```
+
+但 Franka config 在：
+
+```text
+examples/realRobots/Franka/train_files/data_registry
+```
+
+这是两层目录，旧扫描逻辑可能找不到 Quest3 Franka registry。已经修成递归扫描：
+
+```text
+examples/**/train_files/data_registry
+```
+
+修改文件：
+
+```text
+third_party/starVLA/starVLA/dataloader/gr00t_lerobot/registry.py
+```
+
+意义：以后不需要额外复制到 `examples/Franka` 才能被 registry 发现。
+
+### 2.2 lateral 数据重复 3 次并不会真正加权
+
+之前想通过在 mixture 中重复写：
+
+```text
+0150 0151 ... 0162
+```
+
+来让 lateral correction 权重 x3，但 dataloader 原来会跳过重复 dataset：
+
+```text
+Skipping Duplicate Dataset
+```
+
+所以重复 3 次实际上不会生效。
+
+已修改为：如果同一个 `(dataset_name, robot_type)` 重复出现，就累加 weight。
+
+修改文件：
+
+```text
+third_party/starVLA/starVLA/dataloader/lerobot_datasets.py
+```
+
+同时新增明确 mixture：
+
+```text
+quest3_franka_pick_cube_place_box_100eps_lateral11x3_weighted
+```
+
+其中 0150/0151/0152/0153/0154/0157/0158/0159/0160/0161/0162 的 weight 为 3.0。
+
+### 2.3 deployment client 原来会执行完整 8-step chunk
+
+StarVLA policy 每次输出 `(8, 7)` action chunk。原来的真机 client 每次会把 8 个 action 全部执行完，再请求下一帧。这会把闭环视觉控制变成“小段开环”，很容易越过 cube。
+
+已加入：
+
+```text
+--execution-horizon
+```
+
+默认值为 1。现在每次只执行第 1 个 action，然后重新取图推理。
+
+修改文件：
+
+```text
+scripts/starvla_franka_delta_pose_client.py
+```
+
+真机 dry-run 输出中已经确认：
+
+```text
+execution_horizon: 1
+```
+
+### 2.4 modality 脚本默认只覆盖到 0063
+
+原脚本 `apply_quest3_franka_delta_eef_modality.py` 的 `VALID_IDS` 只覆盖早期 40 条数据。如果之后录 0069-0162 等 episode，而没有显式传 `--ids`，就可能漏写 `modality.json`。
+
+已改成默认扫描 root 下所有：
+
+```text
+quest3_franka_tele_*
+```
+
+修改文件：
+
+```text
+scripts/apply_quest3_franka_delta_eef_modality.py
+```
+
+## 3. 数据检查结果
+
+检查了当前 100eps mixture：
+
+```text
+quest3_franka_pick_cube_place_box_100eps_all_qwen
+```
+
+结果：
+
+```text
+entries: 100
+unique episodes: 100
+missing: 0
+bad schema: 0
+total frames: 21506
+episode rows min/median/max: 159 / 213 / 301
+```
+
+全局 action 统计：
+
+```text
+xyz mean:    [ 0.000862, -0.000366, -0.000900]
+xyz absmean: [0.001520, 0.002023, 0.002970]
+
+x pos/neg/near0: 7106 / 4187 / 10213
+y pos/neg/near0: 5521 / 8420 / 7565
+z pos/neg/near0: 4926 / 9541 / 7039
+
+gripper:
+0.0: 7552
+1.0: 13954
+```
+
+lateral11 数据：
+
+```text
+ids: 0150 0151 0152 0153 0154 0157 0158 0159 0160 0161 0162
+frames: 2496
+xyz mean:    [0.000108, 0.000145, 0.000116]
+xyz absmean: [0.000754, 0.002337, 0.001703]
+y pos/neg/near0: 746 / 996 / 754
+gripper 0.0/1.0: 851 / 1645
+```
+
+action 与 target diff 一致性：
+
+```text
+xyz diff mean:   2.32e-08
+xyz diff median: 2.11e-08
+xyz diff max:    6.82e-08
+```
+
+RPY 有少量 2pi wrap row：
+
+```text
+wrap rows: 56 / 21406
+rot wrapped diff median: about 2.18e-4
+```
+
+结论：数据 action label 本身不是明显错位。主要问题不是 parquet action 和 target pose 不一致。
+
+## 4. 训练与 open-loop 实验记录
+
+### 4.1 weighted lateral11x3 训练结果不好
+
+模型：
+
+```text
+quest3_franka_delta_eef_qwenbase_100eps_lateral11x3_weighted_3k
+```
+
+训练：
+
+```text
+Qwen base
+100eps
+lateral11 weight x3
+3000 steps
+```
+
+lateral11 open-loop:
+
+```text
+queries: 220
+first_l2_mean:         0.244063
+first_l2_median:       0.018369
+first_l2_p90:          1.000155
+chunk_l2_mean:         0.322341
+first_xyz_l2_mean:     0.015802
+first_gripper_abs_mean:0.231818
+y_mae:                 0.007775
+y_sign_acc:            0.456522
+pred_y_mean:          -0.001229
+gt_y_mean:             0.002612
+pred_y_abs_mean:       0.006851
+gt_y_abs_mean:         0.003107
+```
+
+结论：这个模型更差，不适合真机。lateral x3 过强或 noisy correction 使模型不稳定，尤其 gripper 和 y 方向都变差。
+
+### 4.2 single episode 0158 overfit：低 LR 失败
+
+模型：
+
+```text
+quest3_franka_single_0158_overfit_qwenbase_2k
+```
+
+低 LR 默认配置训练 2k 后 open-loop：
+
+```text
+queries: 40
+first_l2_mean:         0.458560
+first_l2_median:       0.027137
+first_l2_p90:          1.000220
+chunk_l2_mean:         0.495578
+first_xyz_l2_mean:     0.015785
+first_gripper_abs_mean:0.450000
+y_mae:                 0.008134
+y_sign_acc:            0.500000
+pred_y_mean:          -0.001824
+gt_y_mean:             0.000236
+pred_y_abs_mean:       0.007839
+gt_y_abs_mean:         0.002919
+```
+
+结论：默认 LR `1e-6` 太小，single episode 都不能 overfit，不能用它判断代码完全错误。
+
+### 4.3 single episode 0158 overfit：高 LR 通过一部分
+
+模型：
+
+```text
+quest3_franka_single_0158_overfit_qwenbase_lr1e4_5k
+```
+
+设置：
+
+```text
+lr = 1e-4
+steps = 5000
+freeze qwen_vl_interface
+```
+
+open-loop：
+
+```text
+queries: 40
+first_l2_mean:         0.079026
+first_l2_median:       0.004550
+first_l2_p90:          0.009584
+chunk_l2_mean:         0.094381
+first_xyz_l2_mean:     0.004477
+first_gripper_abs_mean:0.075000
+y_mae:                 0.002803
+y_sign_acc:            0.800000
+pred_y_mean:          -0.000067
+gt_y_mean:             0.000236
+pred_y_abs_mean:       0.003960
+gt_y_abs_mean:         0.002919
+```
+
+结论：主链路可以学习，说明训练/eval/preprocess 不是完全坏的。问题更多是 full 100eps 的训练超参和任务/数据分布。
+
+### 4.4 full 100eps: lr1e-4 5k 过猛
+
+模型：
+
+```text
+quest3_franka_delta_eef_qwenbase_100eps_lr1e4_5k
+```
+
+all100 open-loop：
+
+```text
+queries: 200
+first_l2_mean:         0.249490
+first_l2_median:       0.014343
+first_l2_p90:          1.000063
+chunk_l2_mean:         0.189173
+first_xyz_l2_mean:     0.011920
+first_gripper_abs_mean:0.240000
+y_mae:                 0.003287
+y_sign_acc:            0.588608
+pred_y_abs_mean:       0.002638
+gt_y_abs_mean:         0.002222
+```
+
+lateral11 open-loop：
+
+```text
+queries: 220
+first_l2_mean:         0.266573
+first_l2_median:       0.012213
+first_l2_p90:          1.000039
+chunk_l2_mean:         0.250346
+first_xyz_l2_mean:     0.009551
+first_gripper_abs_mean:0.259091
+y_mae:                 0.003126
+y_sign_acc:            0.706522
+pred_y_abs_mean:       0.002392
+gt_y_abs_mean:         0.003107
+```
+
+结论：`1e-4` 对 full 100eps 太猛，gripper 和 xyz 都变坏，不适合真机。
+
+### 4.5 full 100eps: lr3e-5 5k 成为阶段 best
+
+模型 A：
+
+```text
+quest3_franka_delta_eef_qwenbase_100eps_lr3e5_5k
+```
+
+all100 open-loop：
+
+```text
+queries: 200
+first_l2_mean:         0.018284
+first_l2_median:       0.007895
+first_l2_p90:          0.013465
+chunk_l2_mean:         0.017843
+first_xyz_l2_mean:     0.008321
+first_gripper_abs_mean:0.010000
+y_mae:                 0.002522
+y_sign_acc:            0.639241
+pred_y_abs_mean:       0.001822
+gt_y_abs_mean:         0.002222
+```
+
+lateral11 open-loop：
+
+```text
+queries: 220
+first_l2_mean:         0.109394
+first_l2_median:       0.005415
+first_l2_p90:          1.000000
+chunk_l2_mean:         0.106345
+first_xyz_l2_mean:     0.005439
+first_gripper_abs_mean:0.104545
+y_mae:                 0.002826
+y_sign_acc:            0.722826
+pred_y_abs_mean:       0.001634
+gt_y_abs_mean:         0.003107
+```
+
+结论：比 `1e-4` 稳定很多，是当时最好的 full 100eps 模型。
+
+### 4.6 从 A 继续训练 lr1e-5 3k，得到当前 best
+
+模型 B：
+
+```text
+quest3_franka_delta_eef_qwenbase_100eps_lr3e5_5k_cont_lr1e5_3k
+```
+
+训练路线：
+
+```text
+Qwen base -> lr3e-5 train 5k -> lr1e-5 continue 3k
+```
+
+all100 open-loop：
+
+```text
+queries: 200
+first_l2_mean:         0.008229
+first_l2_median:       0.008092
+first_l2_p90:          0.012925
+chunk_l2_mean:         0.008163
+first_xyz_l2_mean:     0.008132
+first_gripper_abs_mean:0.000000
+y_mae:                 0.002459
+y_sign_acc:            0.664557
+pred_y_mean:           0.001719
+gt_y_mean:             0.001252
+pred_y_abs_mean:       0.002022
+gt_y_abs_mean:         0.002222
+```
+
+lateral11 open-loop：
+
+```text
+queries: 220
+first_l2_mean:         0.077016
+first_l2_median:       0.004534
+first_l2_p90:          0.010009
+chunk_l2_mean:         0.055315
+first_xyz_l2_mean:     0.004533
+first_gripper_abs_mean:0.072727
+y_mae:                 0.002485
+y_sign_acc:            0.750000
+pred_y_mean:           0.001144
+gt_y_mean:             0.002612
+pred_y_abs_mean:       0.001901
+gt_y_abs_mean:         0.003107
+```
+
+结论：B 全面优于 A，尤其 lateral11 的 p90、chunk_l2、gripper 和 y_sign 都改善。当前 best 是 B。
+
+### 4.7 计划中的下一版 C
+
+建议尝试：
+
+```text
+C = B + lr5e-6 + 2000 steps
+```
+
+目标：
+
+1. 看 lateral `y_sign_acc` 能否高于 0.75。
+2. 看 `pred_y_abs_mean` 能否更接近 `gt_y_abs_mean=0.003107`。
+3. 同时确保 gripper 不变差。
+
+如果 C 的 gripper 或 all100 xyz 变差，就停止继续训练，转向采新数据/改任务。
+
+## 5. 磁盘问题
+
+训练 single overfit 时遇到 PyTorch 保存失败：
+
+```text
+PytorchStreamWriter failed writing file
+unexpected pos ...
+```
+
+检查发现 server root 磁盘满：
+
+```text
+Size 877G
+Used 840G
+Avail 60K
+Use% 100%
+```
+
+大目录包括：
+
+```text
+66G quest3_franka_delta_eef_qwenbase_100eps_freezevision_3k
+66G quest3_franka_delta_eef_qwenbase_100eps_lateral11x3_weighted_3k
+66G quest3_franka_delta_eef_from_40eps2k_69eps_3k
+47G quest3_franka_delta_eef_from_69eps3k_89eps_dagger20_2k
+47G quest3_franka_delta_eef_from_libero30k_40eps_2k
+```
+
+处理方式：
+
+1. 删除失败/旧 checkpoint。
+2. 后续训练设置：
+
+```text
+--trainer.save_interval 999999
+```
+
+避免中间 checkpoint 占用大量空间，只保存 final model。
+
+## 6. policy server 与端口
+
+server 没有：
+
+```text
+examples/realRobots/Franka/eval_files/run_policy_server.sh
+```
+
+所以今天直接用：
+
+```bash
+python deployment/model_server/server_policy.py \
+  --ckpt_path <checkpoint> \
+  --port <port> \
+  --use_bf16
+```
+
+端口使用：
+
+```text
+10094: A 模型 lr3e-5 5k
+10095: B 模型 lr3e-5 5k cont lr1e-5 3k
+```
+
+当前推荐使用：
+
+```text
+port 10095
+```
+
+## 7. 真机/ROS 调试结论
+
+### 7.1 execution_horizon=1 已生效
+
+dry-run 输出中已看到：
+
+```text
+action_chunk_shape: (8, 7)
+execution_horizon: 1
+```
+
+这说明部署 client 不再整段执行 8-step chunk，而是每次重新看图。
+
+### 7.2 早期 dry-run 有改善但仍不够
+
+之前使用 A 或阶段 best 做 dry-run：
+
+- y 不再完全为 0；
+- target_pos 有横向变化；
+- 但长时间运行仍然会持续往前/往下，可能越过 cube；
+- 200 steps rate 4.0 时 target z 到了 min-z：
+
+```text
+target_pos z = 0.03
+gripper_values = all 1.0
+```
+
+结论：不适合 execute full task。
+
+### 7.3 post-grasp dry-run 不可靠
+
+手动 close 并夹住 cube 后，跑 post-grasp dry-run。输出显示：
+
+- gripper first-step 经常是 `1.0`，即模型会 open，可能松掉 cube；
+- z 没有明显 lift，只在 0.118-0.121 附近抖动；
+- x/y 有漂移，但不像稳定 move-to-box；
+- 没有稳定的 “hold close -> lift -> move to box” phase。
+
+关键观察：
+
+```text
+step 066 gripper=1.0
+step 067 gripper=0.0
+step 068 gripper=1.0
+...
+step 079 gripper=1.0
+```
+
+结论：不要执行 post-grasp full policy。模型没有稳定学到 place phase。
+
+### 7.4 Quest3 adapter 会抢 /target_pose 和 gripper topic
+
+今天多次遇到：
+
+```text
+cartesian_impedance_controller: Ignoring target_pose message due to multiple publishers detected!
+```
+
+查到 `/target_pose` publisher：
+
+```text
+Node name: quest3_stream_adapter
+```
+
+原因是 Quest3 adapter 还在跑，并且启动参数里有：
+
+```text
+publish_target_pose:=true
+target_pose_topic:=/target_pose
+franka_gripper_command_topic:=/gripper/gripper_position_controller/commands
+```
+
+这会导致：
+
+1. StarVLA execute 被 controller 忽略；
+2. 手动 close gripper 后又被 adapter 打开。
+
+解决：
+
+```bash
+ps aux | grep -E "quest_reader|quest3_stream_adapter" | grep -v grep
+kill <PID>
+```
+
+execute 前必须确认：
+
+```bash
+ros2 topic info /target_pose -v
+```
+
+需要：
+
+```text
+Publisher count: 0
+```
+
+然后再启动 StarVLA client。不要用 `--allow-existing-publisher` 绕过。
+
+## 8. 当前 best 模型与使用方式
+
+当前 best：
+
+```text
+quest3_franka_delta_eef_qwenbase_100eps_lr3e5_5k_cont_lr1e5_3k
+```
+
+checkpoint：
+
+```text
+results/Checkpoints/quest3_franka_delta_eef_qwenbase_100eps_lr3e5_5k_cont_lr1e5_3k/final_model/pytorch_model.pt
+```
+
+启动 policy server：
+
+```bash
+cd /home/hanyu/starVLA
+conda activate starVLA
+export PYTHONPATH=$(pwd):$PYTHONPATH
+export CUDA_VISIBLE_DEVICES=0
+export NO_ALBUMENTATIONS_UPDATE=1
+
+python deployment/model_server/server_policy.py \
+  --ckpt_path results/Checkpoints/quest3_franka_delta_eef_qwenbase_100eps_lr3e5_5k_cont_lr1e5_3k/final_model/pytorch_model.pt \
+  --port 10095 \
+  --use_bf16
+```
+
+robot 端 dry-run：
+
+```bash
+python3 /home/ros/ros2_ws/scripts/starvla_franka_delta_pose_client.py \
+  --policy-host 192.168.1.113 \
+  --policy-port 10095 \
+  --rate 2.0 \
+  --max-steps 100 \
+  --execution-horizon 1 \
+  --max-trans-delta 0.003 \
+  --max-rot-delta 0.001 \
+  --min-z 0.12 \
+  --disable-gripper \
+  --log-timing
+```
+
+如果 execute approach-only：
+
+```bash
+python3 /home/ros/ros2_ws/scripts/starvla_franka_delta_pose_client.py \
+  --policy-host 192.168.1.113 \
+  --policy-port 10095 \
+  --rate 1.0 \
+  --max-steps 40 \
+  --execution-horizon 1 \
+  --max-trans-delta 0.0015 \
+  --max-rot-delta 0.0005 \
+  --min-z 0.12 \
+  --disable-gripper \
+  --execute \
+  --log-timing
+```
+
+execute 前必须确认：
+
+```bash
+ros2 topic info /target_pose -v
+```
+
+并且：
+
+```text
+Publisher count: 0
+```
+
+## 9. 目前不能做的事
+
+暂时不要：
+
+1. 不要直接 full pick-and-place execute。
+2. 不要让模型控制 gripper 去抓取。
+3. 不要在 Quest3 adapter/teleop 还开着时跑 StarVLA execute。
+4. 不要再用 lateral11x3 weighted 3k 模型。
+5. 不要只看 `action_dit_loss` 判断模型好坏。
+
+## 10. 下一步建议
+
+### 10.1 短期：继续训练 C
+
+从当前 B 继续：
+
+```text
+lr = 5e-6
+steps = 2000
+```
+
+目标是看 y 幅度能否继续接近 GT，同时 gripper 不变差。
+
+训练后必须做：
+
+1. all100 open-loop；
+2. lateral11 open-loop；
+3. 对比 B。
+
+如果 C 变差，则停止继续训练。
+
+### 10.2 中期：采 approach-only 数据
+
+因为真机主要问题是 approach 仍会越过 cube，所以建议采一个简单任务：
+
+```text
+move above the cube
+```
+
+数据要求：
+
+1. 20-30 条；
+2. 从 standard pose 到 cube 上方；
+3. 不 close；
+4. 不 place；
+5. 到 cube 正上方后停住；
+6. 覆盖 cube 左/右/前/后的偏移；
+7. 保持 camera/cube/box 布局和部署一致。
+
+这样可以先验证模型是否能稳定 approach 到 cube。
+
+### 10.3 中期：采 post-grasp correction 数据
+
+当前模型不稳定地保持 close 和 lift/place。建议单独采：
+
+```text
+cube already grasped -> lift -> move to box -> lower -> open
+```
+
+数据要求：
+
+1. 至少 20 条；
+2. 开始时 cube 已经在 gripper 里；
+3. gripper 保持 close；
+4. lift 5-10 cm；
+5. move to box；
+6. drop/open；
+7. 尽量减少 phase ambiguity。
+
+### 10.4 长期：加 wrist camera
+
+导师建议的 wrist D435i 是合理的。单第三人称视角在 cube 靠近 gripper 时有遮挡和透视误差，很难精确定位是否已经到 cube 正上方。wrist camera 可能显著提升 approach/grasp phase。
+
+### 10.5 DAgger-lite 继续，但 correction 要从错误刚开始时接管
+
+不要等它已经越过 cube 很远再 correction。应该在它刚出现错误趋势时：
+
+1. stop policy；
+2. 从当前状态 teleop 接管；
+3. move back to cube above；
+4. complete correction；
+5. 录成 LeRobot episode；
+6. 加入训练。
+
+## 11. 给导师的简短汇报版本
+
+今天系统排查了训练和部署链路，发现并修复了几个重要问题：StarVLA registry 原来无法稳定发现 `examples/realRobots/Franka` 下的 config；mixture 里重复 lateral 数据会被 dataloader 去重，因此 lateral x3 实际没有生效；真机 deployment client 原来会执行完整 8-step action chunk，导致视觉闭环变成小段开环，容易越过 cube。修复后加入了 `execution_horizon=1`，并用 open-loop 系统比较不同训练策略。
+
+数据检查显示 100eps 的 action schema 和 modality 基本正确，action 与 target pose diff 在平移上高度一致，说明 label 本身不是明显错位。single-episode overfit 在提高学习率后可以拟合，说明训练/eval/preprocess 主链路不是完全坏的。完整 100eps 训练中，`lr=1e-4` 太大导致 gripper 和 xyz 变差；`lr=3e-5 5k` 后再用 `lr=1e-5` 继续 3k 得到目前 best。该模型 open-loop 上 all100 gripper error 降到 0，lateral y sign 提升到 0.75，但真机仍无法稳定 approach/grasp/place，尤其 gripper phase 和 post-grasp lift/place 不稳定。下一步建议继续小 LR 训练 2k 做对比，同时采 approach-only 和 post-grasp correction 数据，或者增加 wrist camera。
+
+## 12. 当前状态
+
+当前 best model：
+
+```text
+quest3_franka_delta_eef_qwenbase_100eps_lr3e5_5k_cont_lr1e5_3k
+```
+
+当前 policy server 推荐端口：
+
+```text
+10095
+```
+
+当前可以做：
+
+```text
+approach-only dry-run
+very conservative approach-only execute
+```
+
+当前不建议做：
+
+```text
+full pick-and-place execute
+model-controlled gripper grasp
+post-grasp execute
+```
+
+下一步优先级：
+
+1. 训练 C：B + lr5e-6 + 2k。
+2. open-loop 对比 B/C。
+3. 如果 C 不改善，停止继续调训练步数。
+4. 采 approach-only / post-grasp correction。
+5. 准备 wrist camera mount/双相机版本。
+

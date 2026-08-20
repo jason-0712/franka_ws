@@ -1,0 +1,1400 @@
+diff --git a/examples/realRobots/Franka/rl/franka_ros2_shadow_adapter.py b/examples/realRobots/Franka/rl/franka_ros2_shadow_adapter.py
+index fe2d54c..8490b28 100755
+--- a/examples/realRobots/Franka/rl/franka_ros2_shadow_adapter.py
++++ b/examples/realRobots/Franka/rl/franka_ros2_shadow_adapter.py
+@@ -15,6 +15,8 @@ import json
+ import math
+ import os
+ import re
++import socket
++import struct
+ import threading
+ import time
+ from dataclasses import dataclass
+@@ -142,6 +144,97 @@ class DirectShadowWebsocketClient:
+         self._connection.close()
+ 
+ 
++_TCP_FRAME_HEADER = struct.Struct("!I")
++_TCP_MAX_FRAME_BYTES = 32 * 1024 * 1024
++
++
++def _tcp_recv_exact(connection: socket.socket, size: int) -> bytes:
++    chunks = bytearray()
++    while len(chunks) < size:
++        block = connection.recv(size - len(chunks))
++        if not block:
++            raise ShadowAdapterError("TCP policy connection closed mid-frame")
++        chunks.extend(block)
++    return bytes(chunks)
++
++
++def _tcp_recv_frame(connection: socket.socket) -> bytes:
++    payload, _ = _tcp_recv_frame_with_timing(connection)
++    return payload
++
++
++def _tcp_recv_frame_with_timing(connection: socket.socket) -> tuple[bytes, dict[str, float | int]]:
++    header_started = time.perf_counter()
++    (size,) = _TCP_FRAME_HEADER.unpack(_tcp_recv_exact(connection, _TCP_FRAME_HEADER.size))
++    header_finished = time.perf_counter()
++    _require(0 < size <= _TCP_MAX_FRAME_BYTES, f"Invalid TCP policy frame size: {size}")
++    payload_started = time.perf_counter()
++    payload = _tcp_recv_exact(connection, size)
++    payload_finished = time.perf_counter()
++    return payload, {
++        "response_header_wait_s": header_finished - header_started,
++        "response_payload_receive_s": payload_finished - payload_started,
++        "response_frame_receive_s": payload_finished - header_started,
++        "response_frame_bytes": size,
++    }
++
++
++def _tcp_send_frame(connection: socket.socket, payload: bytes) -> None:
++    _require(0 < len(payload) <= _TCP_MAX_FRAME_BYTES, f"Invalid outbound TCP frame size: {len(payload)}")
++    connection.sendall(_TCP_FRAME_HEADER.pack(len(payload)) + payload)
++
++
++class DirectShadowTcpClient:
++    """Persistent raw-TCP alternative using exactly the same MsgPack payloads."""
++
++    def __init__(self, *, host: str, port: int) -> None:
++        import msgpack
++
++        _require(bool(host.strip()), "Policy host must not be empty")
++        _require(1 <= port <= 65535, "Policy port must be within 1..65535")
++        self._msgpack = msgpack
++        self._packer = msgpack.Packer(default=_pack_array)
++        self._connection = socket.create_connection((host, port), timeout=30.0)
++        self._connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
++        self._connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
++        metadata = _tcp_recv_frame(self._connection)
++        self._metadata = self._msgpack.unpackb(metadata, object_hook=_unpack_array)
++        self._last_transport_timing: dict[str, float | int] = {}
++        _require(isinstance(self._metadata, Mapping), "TCP shadow server metadata is invalid")
++
++    def get_server_metadata(self) -> Mapping[str, Any]:
++        return self._metadata
++
++    def predict_action(self, query_info: Mapping[str, Any]) -> Mapping[str, Any]:
++        total_started = time.perf_counter()
++        pack_started = time.perf_counter()
++        request_payload = self._packer.pack(dict(query_info))
++        pack_finished = time.perf_counter()
++        send_started = time.perf_counter()
++        _tcp_send_frame(self._connection, request_payload)
++        send_finished = time.perf_counter()
++        response_payload, receive_timing = _tcp_recv_frame_with_timing(self._connection)
++        unpack_started = time.perf_counter()
++        unpacked = self._msgpack.unpackb(response_payload, object_hook=_unpack_array)
++        unpack_finished = time.perf_counter()
++        self._last_transport_timing = {
++            "client_total_s": unpack_finished - total_started,
++            "request_pack_s": pack_finished - pack_started,
++            "request_send_s": send_finished - send_started,
++            "request_frame_bytes": len(request_payload),
++            **receive_timing,
++            "response_unpack_s": unpack_finished - unpack_started,
++        }
++        _require(isinstance(unpacked, Mapping), "TCP shadow server response is invalid")
++        return unpacked
++
++    def get_last_transport_timing(self) -> Mapping[str, float | int]:
++        return MappingProxyType(dict(self._last_transport_timing))
++
++    def close(self) -> None:
++        self._connection.close()
++
++
+ def _require(condition: bool, message: str) -> None:
+     if not condition:
+         raise ShadowAdapterError(message)
+diff --git a/examples/realRobots/Franka/rl/qwengroot_rl_policy.py b/examples/realRobots/Franka/rl/qwengroot_rl_policy.py
+index 76489c9..77a50b9 100644
+--- a/examples/realRobots/Franka/rl/qwengroot_rl_policy.py
++++ b/examples/realRobots/Franka/rl/qwengroot_rl_policy.py
+@@ -29,6 +29,11 @@ from typing import Any, Literal, Mapping, Protocol, Sequence
+ 
+ import numpy as np
+ 
++try:
++    from .qwen_backbone_inference import install_qwen_lm_head_bypass
++except ImportError:  # Direct script execution on the GPU host.
++    from qwen_backbone_inference import install_qwen_lm_head_bypass
++
+ ACTION_DIM = 7
+ ACTION_HORIZON = 8
+ STATE_DIM = 7
+@@ -242,9 +247,29 @@ def _native_inference_scope():
+ class NativeStarVLANormalizedBackend:
+     """Use native StarVLA inference and return only normalized action chunks."""
+ 
+-    def __init__(self, model: Any, *, base_policy_uses_state: bool = False) -> None:
++    def __init__(
++        self,
++        model: Any,
++        *,
++        base_policy_uses_state: bool = False,
++        skip_lm_head: bool = False,
++    ) -> None:
+         self.model = model
+         self.base_policy_uses_state = bool(base_policy_uses_state)
++        self.skip_lm_head = bool(skip_lm_head)
++        if self.skip_lm_head:
++            self._install_backbone_fastpath()
++
++    def _install_backbone_fastpath(self) -> None:
++        """Bypass only unused logits on this model; keep StarVLA source untouched."""
++
++        interface = getattr(self.model, "qwen_vl_interface", None)
++        if interface is None or not callable(getattr(interface, "forward", None)):
++            raise PolicyContractError("QwenGR00T fast path requires qwen_vl_interface.forward")
++        if getattr(interface, "_qwengroot_backbone_fastpath_v1", False):
++            raise PolicyContractError("QwenGR00T backbone fast path is already installed")
++        install_qwen_lm_head_bypass(interface)
++        interface._qwengroot_backbone_fastpath_v1 = True
+ 
+     def predict_normalized_action_batch(
+         self,
+@@ -278,6 +303,7 @@ class NativeStarVLANormalizedBackend:
+                 "mode": mode,
+                 "seed": seed,
+                 "base_policy_uses_state": self.base_policy_uses_state,
++                "skip_lm_head": self.skip_lm_head,
+             },
+         )
+ 
+@@ -301,12 +327,16 @@ class QwenGR00TRLPolicy:
+         unnorm_key: str,
+         residual_limits: Sequence[float] | None = None,
+         base_policy_uses_state: bool = False,
++        skip_lm_head: bool = False,
+     ) -> None:
+         if bool(base_policy_uses_state):
+             raise PolicyContractError("This audited Libero-init checkpoint was trained with include_state=false")
+         backend_uses_state = getattr(backend, "base_policy_uses_state", None)
+         if backend_uses_state is not None and bool(backend_uses_state):
+             raise PolicyContractError("Backend must not feed state to the frozen base policy")
++        backend_skip_lm_head = getattr(backend, "skip_lm_head", None)
++        if backend_skip_lm_head is not None and bool(backend_skip_lm_head) != bool(skip_lm_head):
++            raise PolicyContractError("Backend/policy skip_lm_head contract mismatch")
+         if not re.fullmatch(r"[0-9a-f]{64}", str(checkpoint_sha256)):
+             raise PolicyContractError("checkpoint_sha256 must be 64 lowercase hex characters")
+         if not str(policy_version).strip():
+@@ -345,6 +375,11 @@ class QwenGR00TRLPolicy:
+                 "residual_limits": tuple(float(value) for value in self._residual_limits),
+                 "residual_semantics": "physical_6d_cartesian_first_action_only",
+                 "gripper_residual": False,
++                "inference_optimization": (
++                    "qwen_conditional_forward_lm_head_bypass_v1"
++                    if skip_lm_head
++                    else "legacy_full_conditional_generation_forward"
++                ),
+             }
+         )
+ 
+@@ -368,6 +403,7 @@ class QwenGR00TRLPolicy:
+         use_bf16: bool = True,
+         verify_checkpoint_sha256: bool = True,
+         residual_limits: Sequence[float] | None = None,
++        skip_lm_head: bool = True,
+     ) -> "QwenGR00TRLPolicy":
+         """Strictly load the audited checkpoint and authoritative normalizer.
+ 
+@@ -441,7 +477,11 @@ class QwenGR00TRLPolicy:
+             model = model.to(device=device)
+         model = model.eval()
+         normalizer = PolicyNormProcessor(str(resolved_checkpoint), unnorm_key=unnorm_key)
+-        backend = NativeStarVLANormalizedBackend(model, base_policy_uses_state=False)
++        backend = NativeStarVLANormalizedBackend(
++            model,
++            base_policy_uses_state=False,
++            skip_lm_head=skip_lm_head,
++        )
+         run_id = str(_nested_get(checkpoint_info, "run_id"))
+         policy_version = f"{run_id}@{expected_sha256[:12]}"
+ 
+@@ -454,6 +494,7 @@ class QwenGR00TRLPolicy:
+             unnorm_key=unnorm_key,
+             residual_limits=residual_limits,
+             base_policy_uses_state=False,
++            skip_lm_head=skip_lm_head,
+         )
+ 
+     def _unnormalize_once_per_sample(self, normalized_actions: np.ndarray) -> np.ndarray:
+diff --git a/examples/realRobots/Franka/rl/qwengroot_shadow_policy_server.py b/examples/realRobots/Franka/rl/qwengroot_shadow_policy_server.py
+index bd9e982..0471c89 100755
+--- a/examples/realRobots/Franka/rl/qwengroot_shadow_policy_server.py
++++ b/examples/realRobots/Franka/rl/qwengroot_shadow_policy_server.py
+@@ -5,12 +5,15 @@ from __future__ import annotations
+ 
+ import argparse
+ import logging
++import time
+ from pathlib import Path
+ from typing import Any, Mapping
+ 
+ import numpy as np
+ 
+ try:
++    from .qwengroot_low_jitter_tcp_server import LowJitterTcpPolicyServer
++    from .qwengroot_low_jitter_websocket_server import LowJitterWebsocketPolicyServer
+     from .qwengroot_rl_policy import QwenGR00TRLPolicy
+     from .qwengroot_shadow_protocol import (
+         PROTOCOL_NAME,
+@@ -18,6 +21,8 @@ try:
+         serialize_shadow_stages,
+     )
+ except ImportError:  # Direct script execution on the GPU host.
++    from qwengroot_low_jitter_tcp_server import LowJitterTcpPolicyServer
++    from qwengroot_low_jitter_websocket_server import LowJitterWebsocketPolicyServer
+     from qwengroot_rl_policy import QwenGR00TRLPolicy
+     from qwengroot_shadow_protocol import (
+         PROTOCOL_NAME,
+@@ -69,6 +74,7 @@ class QwenGR00TShadowPolicyService:
+         mode: str = "shadow",
+         seed: int = 42,
+     ) -> dict[str, Any]:
++        service_started = time.perf_counter()
+         if mode != "shadow":
+             raise ShadowServiceError(f"Only mode='shadow' is allowed, got {mode!r}")
+         if not isinstance(env_obs, Mapping):
+@@ -87,7 +93,9 @@ class QwenGR00TShadowPolicyService:
+             raise ShadowServiceError(f"Unexpected residual shape: {residual.shape}")
+         if not np.isfinite(residual).all() or np.count_nonzero(residual) != 0:
+             raise ShadowServiceError("Shadow service accepts only an exact zero residual")
++        validation_finished = time.perf_counter()
+ 
++        policy_started = time.perf_counter()
+         stages = self._policy.predict_action(
+             env_obs,
+             residual_action=residual,
+@@ -98,7 +106,16 @@ class QwenGR00TShadowPolicyService:
+             raise ShadowServiceError("Formal policy produced a non-zero shadow residual")
+         if not np.array_equal(stages.proposed_action, stages.base_first_action):
+             raise ShadowServiceError("Shadow proposal differs from frozen base action")
+-        return serialize_shadow_stages(stages)
++        policy_finished = time.perf_counter()
++        result = serialize_shadow_stages(stages)
++        postprocess_finished = time.perf_counter()
++        result["service_timing"] = {
++            "request_validation_s": validation_finished - service_started,
++            "policy_predict_action_s": policy_finished - policy_started,
++            "policy_postprocess_s": postprocess_finished - policy_finished,
++            "service_total_s": postprocess_finished - service_started,
++        }
++        return result
+ 
+ 
+ def build_parser() -> argparse.ArgumentParser:
+@@ -113,6 +130,17 @@ def build_parser() -> argparse.ArgumentParser:
+     parser.add_argument("--host", default="0.0.0.0")
+     parser.add_argument("--port", type=int, default=10098)
+     parser.add_argument("--idle-timeout", type=int, default=1800)
++    parser.add_argument("--transport", choices=("websocket", "tcp"), default="websocket")
++    parser.add_argument(
++        "--disable-backbone-fastpath",
++        action="store_true",
++        help="A/B fallback: retain the legacy vocabulary-logit projection",
++    )
++    parser.add_argument(
++        "--verbose-request-logs",
++        action="store_true",
++        help="Enable per-request INFO logs; disabled by default to avoid control-loop jitter",
++    )
+     return parser
+ 
+ 
+@@ -123,10 +151,6 @@ def main() -> None:
+     if args.idle_timeout == 0 or args.idle_timeout < -1:
+         raise ValueError("--idle-timeout must be -1 or a positive number of seconds")
+ 
+-    from deployment.model_server.tools.websocket_policy_server import (
+-        WebsocketPolicyServer,
+-    )
+-
+     logging.basicConfig(level=logging.INFO, force=True)
+     logging.info("Loading audited QwenGR00T policy for shadow-only service")
+     policy = QwenGR00TRLPolicy.from_checkpoint(
+@@ -136,6 +160,7 @@ def main() -> None:
+         use_bf16=True,
+         verify_checkpoint_sha256=True,
+         residual_limits=np.zeros((6,), dtype=np.float32),
++        skip_lm_head=not args.disable_backbone_fastpath,
+     )
+     service = QwenGR00TShadowPolicyService(policy)
+     logging.warning(
+@@ -144,13 +169,19 @@ def main() -> None:
+         args.port,
+         service.metadata,
+     )
+-    server = WebsocketPolicyServer(
++    server_metadata = service.metadata
++    server_metadata["request_logging"] = "INFO" if args.verbose_request_logs else "WARNING_ONLY"
++    server_metadata["transport"] = args.transport
++    server_class = LowJitterTcpPolicyServer if args.transport == "tcp" else LowJitterWebsocketPolicyServer
++    server = server_class(
+         policy=service,
+         host=args.host,
+         port=args.port,
+         idle_timeout=args.idle_timeout,
+-        metadata=service.metadata,
++        metadata=server_metadata,
+     )
++    if not args.verbose_request_logs:
++        logging.disable(logging.INFO)
+     server.serve_forever()
+ 
+ 
+diff --git a/examples/realRobots/Franka/rl/qwengroot_shadow_protocol.py b/examples/realRobots/Franka/rl/qwengroot_shadow_protocol.py
+index 27c2b85..e1e889f 100755
+--- a/examples/realRobots/Franka/rl/qwengroot_shadow_protocol.py
++++ b/examples/realRobots/Franka/rl/qwengroot_shadow_protocol.py
+@@ -283,6 +283,10 @@ def parse_shadow_response(
+     timing = response.get("timing", {})
+     _require(isinstance(timing, Mapping), "response timing must be a mapping")
+     timing_record = {key: float(value) for key, value in timing.items()}
++    service_timing = data.get("service_timing", {})
++    _require(isinstance(service_timing, Mapping), "service_timing must be a mapping")
++    for key, value in service_timing.items():
++        timing_record[f"service_{key}"] = float(value)
+     timing_record["client_roundtrip_s"] = float(client_roundtrip_s)
+     _require(
+         all(np.isfinite(value) and value >= 0.0 for value in timing_record.values()),
+diff --git a/tests/test_qwengroot_rl_policy.py b/tests/test_qwengroot_rl_policy.py
+index 110e932..646bdd6 100644
+--- a/tests/test_qwengroot_rl_policy.py
++++ b/tests/test_qwengroot_rl_policy.py
+@@ -4,6 +4,7 @@ from __future__ import annotations
+ 
+ import unittest
+ from dataclasses import replace
++from types import SimpleNamespace
+ 
+ import numpy as np
+ 
+@@ -77,6 +78,20 @@ class _FakeNativeModel:
+         return {"normalized_actions": np.zeros((len(examples), 8, 7), dtype=np.float32)}
+ 
+ 
++class _FakeFastNativeModel:
++    def __init__(self) -> None:
++        self.examples = None
++        lm_head = SimpleNamespace(forward=lambda hidden_states: ("legacy-logits", hidden_states))
++        self.qwen_vl_interface = SimpleNamespace(
++            forward=lambda **kwargs: SimpleNamespace(hidden_states=("legacy",)),
++            model=SimpleNamespace(lm_head=lm_head),
++        )
++
++    def predict_action(self, *, examples):
++        self.examples = examples
++        return {"normalized_actions": np.zeros((len(examples), 8, 7), dtype=np.float32)}
++
++
+ def _policy(
+     actions: np.ndarray,
+     *,
+@@ -240,6 +255,44 @@ class QwenGR00TRLPolicyTest(unittest.TestCase):
+         self.assertNotIn("state", model.examples[0])
+         self.assertEqual(len(model.examples[0]["image"]), 2)
+ 
++    def test_native_backend_explicitly_enables_backbone_fastpath(self):
++        model = _FakeFastNativeModel()
++        backend = NativeStarVLANormalizedBackend(
++            model,
++            base_policy_uses_state=False,
++            skip_lm_head=True,
++        )
++
++        output = backend.predict_normalized_action_batch(
++            _env_obs(),
++            mode="shadow",
++            seed=None,
++        )
++
++        self.assertTrue(model.qwen_vl_interface._qwengroot_backbone_fastpath_v1)
++        self.assertTrue(model.qwen_vl_interface.model.lm_head._qwengroot_lm_head_bypass_v1)
++        output_value = model.qwen_vl_interface.forward(input_ids="ids")
++        self.assertEqual(output_value.hidden_states, ("legacy",))
++        self.assertTrue(output.metadata["skip_lm_head"])
++
++    def test_policy_rejects_fastpath_metadata_mismatch(self):
++        backend = NativeStarVLANormalizedBackend(
++            _FakeFastNativeModel(),
++            base_policy_uses_state=False,
++            skip_lm_head=True,
++        )
++
++        with self.assertRaisesRegex(PolicyContractError, "skip_lm_head contract mismatch"):
++            QwenGR00TRLPolicy(
++                backend=backend,
++                normalizer=_FakeNormalizer(),
++                checkpoint_path="/data/checkpoint.pt",
++                checkpoint_sha256=CHECKPOINT_SHA256,
++                policy_version="test",
++                unnorm_key="franka",
++                skip_lm_head=False,
++            )
++
+     def test_transition_prefix_returns_mutable_copies(self):
+         policy, _, _ = _policy(np.zeros((1, 8, 7), dtype=np.float32))
+         result = policy.predict_action(_env_obs())
+diff --git a/tests/test_qwengroot_shadow_adapter.py b/tests/test_qwengroot_shadow_adapter.py
+index 09b08ab..bffb48b 100644
+--- a/tests/test_qwengroot_shadow_adapter.py
++++ b/tests/test_qwengroot_shadow_adapter.py
+@@ -202,6 +202,10 @@ class QwenGR00TShadowAdapterTest(unittest.TestCase):
+         self.assertEqual(service.metadata["allowed_modes"], ["shadow"])
+         self.assertEqual(output["action_execution"], "NOT_RUN")
+         self.assertEqual(policy.calls[0]["mode"], "shadow")
++        timing = output["service_timing"]
++        self.assertGreaterEqual(timing["service_total_s"], timing["policy_predict_action_s"])
++        self.assertGreaterEqual(timing["request_validation_s"], 0.0)
++        self.assertGreaterEqual(timing["policy_postprocess_s"], 0.0)
+ 
+     def test_observe_only_commits_atomic_episode_without_policy(self):
+         with tempfile.TemporaryDirectory() as temp_dir:
+diff --git a/examples/realRobots/Franka/rl/benchmark_qwengroot_shadow_latency.py b/examples/realRobots/Franka/rl/benchmark_qwengroot_shadow_latency.py
+new file mode 100644
+index 0000000..6902c8a
+--- /dev/null
++++ b/examples/realRobots/Franka/rl/benchmark_qwengroot_shadow_latency.py
+@@ -0,0 +1,364 @@
++#!/usr/bin/env python3
++"""Benchmark deterministic QwenGR00T shadow latency and action parity offline."""
++
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import statistics
++import time
++from pathlib import Path
++from typing import Any, Mapping
++
++import numpy as np
++
++try:
++    from .franka_ros2_shadow_adapter import DirectShadowTcpClient, DirectShadowWebsocketClient
++except ImportError:  # Direct script execution in the robot container.
++    from franka_ros2_shadow_adapter import DirectShadowTcpClient, DirectShadowWebsocketClient
++
++
++SAFETY = "SHADOW_BENCHMARK_ONLY; NO_ROS; NO_ROBOT_COMMAND; NO_OPTIMIZER"
++ACTION_FIELDS = (
++    "policy_action_normalized_raw",
++    "policy_action_normalized",
++    "policy_action_physical",
++    "base_first_action",
++    "proposed_action",
++)
++
++
++class ShadowLatencyBenchmarkError(RuntimeError):
++    """Raised when latency inputs, server identity, or parity fail closed."""
++
++
++def _require(condition: bool, message: str) -> None:
++    if not condition:
++        raise ShadowLatencyBenchmarkError(message)
++
++
++def _percentile(values: list[float], fraction: float) -> float:
++    ordered = sorted(values)
++    index = min(len(ordered) - 1, max(0, round(fraction * (len(ordered) - 1))))
++    return ordered[index]
++
++
++def _summary(values: list[float]) -> dict[str, float]:
++    _require(bool(values), "Cannot summarize an empty latency sequence")
++    return {
++        "min": min(values),
++        "p50": statistics.median(values),
++        "p95": _percentile(values, 0.95),
++        "max": max(values),
++        "mean": statistics.mean(values),
++    }
++
++
++def _canonical_sha256(value: Any) -> str:
++    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
++    return hashlib.sha256(payload).hexdigest()
++
++
++def _load_episode_observations(episode: Path) -> list[dict[str, Any]]:
++    manifest = json.loads((episode / "manifest.json").read_text(encoding="utf-8"))
++    _require(manifest.get("episode_id") == episode.name, "Episode ID/path mismatch")
++    rows = [json.loads(line) for line in (episode / "transitions.jsonl").read_text().splitlines() if line]
++    _require(bool(rows), "Episode contains no transitions")
++    observations: list[dict[str, Any]] = []
++    for row in rows:
++        value = row["observation"]
++        observations.append(
++            {
++                "main_images": np.load(episode / value["main_image_ref"], allow_pickle=False)[None, ...],
++                "wrist_images": np.load(episode / value["wrist_image_ref"], allow_pickle=False)[None, ...],
++                "states": np.asarray(value["raw_state"], dtype=np.float32)[None, ...],
++                "task_descriptions": [row["task_description"]],
++            }
++        )
++    return observations
++
++
++def _action_record(data: Mapping[str, Any]) -> dict[str, Any]:
++    record: dict[str, Any] = {}
++    for field in ACTION_FIELDS:
++        value = np.asarray(data.get(field), dtype=np.float32)
++        _require(bool(np.isfinite(value).all()), f"{field} contains NaN/Inf")
++        record[field] = value.tolist()
++    return record
++
++
++def _max_abs(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
++    differences = []
++    for field in ACTION_FIELDS:
++        left_value = np.asarray(left[field], dtype=np.float32)
++        right_value = np.asarray(right[field], dtype=np.float32)
++        _require(left_value.shape == right_value.shape, f"Reference shape mismatch: {field}")
++        differences.append(float(np.max(np.abs(left_value - right_value), initial=0.0)))
++    return max(differences, default=0.0)
++
++
++def run(args: argparse.Namespace) -> dict[str, Any]:
++    episode = args.episode.expanduser().resolve()
++    _require(episode.is_dir() and not episode.is_symlink(), f"Invalid episode: {episode}")
++    _require(args.warmup_calls >= 0, "--warmup-calls must be non-negative")
++    _require(args.measured_calls > 0, "--measured-calls must be positive")
++    _require(args.p95_gate_ms > 0.0 and args.max_gate_ms > 0.0, "Latency gates must be positive")
++    observations = _load_episode_observations(episode)
++    reference = None
++    if args.reference_report is not None:
++        reference_report = json.loads(args.reference_report.read_text(encoding="utf-8"))
++        reference = reference_report.get("action_reference")
++        _require(isinstance(reference, list), "Reference report has no action_reference")
++        _require(len(reference) == len(observations), "Reference observation count mismatch")
++
++    client_class = DirectShadowTcpClient if args.transport == "tcp" else DirectShadowWebsocketClient
++    client = client_class(host=args.host, port=args.port)
++    metadata = dict(client.get_server_metadata())
++    policy_metadata = metadata.get("policy_metadata")
++    _require(isinstance(policy_metadata, Mapping), "Server policy metadata is missing")
++    _require(
++        policy_metadata.get("checkpoint_sha256") == args.checkpoint_sha256,
++        "Server checkpoint identity mismatch",
++    )
++    if args.expect_optimization is not None:
++        _require(
++            policy_metadata.get("inference_optimization") == args.expect_optimization,
++            "Server inference-optimization identity mismatch",
++        )
++
++    roundtrip_ms: list[float] = []
++    service_ms: list[float] = []
++    service_total_ms: list[float] = []
++    server_route_ms: list[float] = []
++    request_unpack_ms: list[float] = []
++    response_pack_ms: list[float] = []
++    tcp_timing_ms: dict[str, list[float]] = {
++        "client_total_ms": [],
++        "request_pack_ms": [],
++        "request_send_ms": [],
++        "response_header_wait_ms": [],
++        "response_payload_receive_ms": [],
++        "response_frame_receive_ms": [],
++        "response_unpack_ms": [],
++        "server_request_header_wait_ms": [],
++        "server_request_payload_receive_ms": [],
++        "server_request_frame_receive_ms": [],
++    }
++    measured_call_timings: list[dict[str, Any]] = []
++    measured_actions: list[dict[str, Any] | None] = [None] * len(observations)
++    total_calls = args.warmup_calls + args.measured_calls
++    try:
++        for call_index in range(total_calls):
++            observation_index = call_index % len(observations)
++            request = {
++                "type": "predict_action",
++                "request_id": f"latency-{args.port}-{call_index}",
++                "payload": {
++                    "env_obs": observations[observation_index],
++                    "residual_action": np.zeros((1, 6), dtype=np.float32),
++                    "mode": "shadow",
++                    "seed": args.seed,
++                },
++            }
++            started = time.perf_counter()
++            response = client.predict_action(request)
++            elapsed_ms = (time.perf_counter() - started) * 1000.0
++            _require(response.get("ok") is True, f"Policy request failed: {response}")
++            data = response.get("data")
++            _require(isinstance(data, Mapping), "Policy response data is missing")
++            action = _action_record(data)
++            if call_index >= args.warmup_calls:
++                roundtrip_ms.append(elapsed_ms)
++                timing = data.get("service_timing", {})
++                if isinstance(timing, Mapping) and "policy_predict_action_s" in timing:
++                    service_ms.append(float(timing["policy_predict_action_s"]) * 1000.0)
++                if isinstance(timing, Mapping) and "service_total_s" in timing:
++                    service_total_ms.append(float(timing["service_total_s"]) * 1000.0)
++                outer_timing = response.get("timing", {})
++                if isinstance(outer_timing, Mapping) and "server_route_s" in outer_timing:
++                    server_route_ms.append(float(outer_timing["server_route_s"]) * 1000.0)
++                if isinstance(outer_timing, Mapping) and "request_unpack_s" in outer_timing:
++                    request_unpack_ms.append(float(outer_timing["request_unpack_s"]) * 1000.0)
++                if isinstance(outer_timing, Mapping) and "response_pack_probe_s" in outer_timing:
++                    response_pack_ms.append(float(outer_timing["response_pack_probe_s"]) * 1000.0)
++                sample: dict[str, Any] = {
++                    "call_index": call_index,
++                    "observation_index": observation_index,
++                    "roundtrip_ms": elapsed_ms,
++                }
++                if args.transport == "tcp":
++                    client_timing = client.get_last_transport_timing()
++                    client_fields = {
++                        "client_total_s": "client_total_ms",
++                        "request_pack_s": "request_pack_ms",
++                        "request_send_s": "request_send_ms",
++                        "response_header_wait_s": "response_header_wait_ms",
++                        "response_payload_receive_s": "response_payload_receive_ms",
++                        "response_frame_receive_s": "response_frame_receive_ms",
++                        "response_unpack_s": "response_unpack_ms",
++                    }
++                    server_fields = {
++                        "request_header_wait_s": "server_request_header_wait_ms",
++                        "request_payload_receive_s": "server_request_payload_receive_ms",
++                        "request_frame_receive_s": "server_request_frame_receive_ms",
++                    }
++                    for source, target in client_fields.items():
++                        value = float(client_timing[source]) * 1000.0
++                        tcp_timing_ms[target].append(value)
++                        sample[target] = value
++                    for source, target in server_fields.items():
++                        value = float(outer_timing[source]) * 1000.0
++                        tcp_timing_ms[target].append(value)
++                        sample[target] = value
++                    sample["request_frame_bytes"] = int(client_timing["request_frame_bytes"])
++                    sample["response_frame_bytes"] = int(client_timing["response_frame_bytes"])
++                if isinstance(outer_timing, Mapping):
++                    for source, target in (
++                        ("request_unpack_s", "request_unpack_ms"),
++                        ("server_route_s", "server_route_ms"),
++                        ("response_pack_probe_s", "response_pack_probe_ms"),
++                    ):
++                        if source in outer_timing:
++                            sample[target] = float(outer_timing[source]) * 1000.0
++                measured_call_timings.append(sample)
++                if measured_actions[observation_index] is None:
++                    measured_actions[observation_index] = action
++                else:
++                    _require(
++                        _max_abs(measured_actions[observation_index], action) == 0.0,
++                        f"Repeated deterministic output changed for observation {observation_index}",
++                    )
++    finally:
++        client.close()
++
++    _require(all(value is not None for value in measured_actions), "Not every observation was measured")
++    action_reference = [value for value in measured_actions if value is not None]
++    reference_max_abs = None
++    if reference is not None:
++        reference_max_abs = max(
++            _max_abs(expected, actual)
++            for expected, actual in zip(reference, action_reference, strict=True)
++        )
++        _require(reference_max_abs <= args.parity_atol, f"Action parity failed: max_abs={reference_max_abs}")
++
++    roundtrip = _summary(roundtrip_ms)
++    latency_gate_pass = roundtrip["p95"] <= args.p95_gate_ms and roundtrip["max"] <= args.max_gate_ms
++    if args.require_latency_gate:
++        _require(latency_gate_pass, f"Latency gate failed: p95={roundtrip['p95']}, max={roundtrip['max']}")
++    report = {
++        "status": "PASS",
++        "safety": SAFETY,
++        "host": args.host,
++        "port": args.port,
++        "transport": args.transport,
++        "episode": str(episode),
++        "observation_count": len(observations),
++        "warmup_calls": args.warmup_calls,
++        "measured_calls": args.measured_calls,
++        "seed": args.seed,
++        "checkpoint_sha256": args.checkpoint_sha256,
++        "inference_optimization": policy_metadata.get("inference_optimization"),
++        "roundtrip_ms": roundtrip,
++        "service_policy_ms": _summary(service_ms) if service_ms else None,
++        "service_total_ms": _summary(service_total_ms) if service_total_ms else None,
++        "server_route_ms": _summary(server_route_ms) if server_route_ms else None,
++        "request_unpack_ms": _summary(request_unpack_ms) if request_unpack_ms else None,
++        "response_pack_probe_ms": _summary(response_pack_ms) if response_pack_ms else None,
++        "tcp_stage_ms": (
++            {name: _summary(values) for name, values in tcp_timing_ms.items()}
++            if args.transport == "tcp"
++            else None
++        ),
++        "measured_call_timings": measured_call_timings,
++        "transport_serialization_gap_ms_mean": (
++            statistics.mean(
++                roundtrip_value - service_value
++                for roundtrip_value, service_value in zip(
++                    roundtrip_ms,
++                    service_total_ms if len(service_total_ms) == len(roundtrip_ms) else service_ms,
++                    strict=True,
++                )
++            )
++            if len(service_total_ms) == len(roundtrip_ms) or len(service_ms) == len(roundtrip_ms)
++            else None
++        ),
++        "policy_wrapper_gap_ms_mean": (
++            statistics.mean(
++                total_value - policy_value
++                for total_value, policy_value in zip(service_total_ms, service_ms, strict=True)
++            )
++            if len(service_total_ms) == len(service_ms) == len(roundtrip_ms)
++            else None
++        ),
++        "client_minus_measured_server_ms_mean": (
++            statistics.mean(
++                roundtrip_value - unpack_value - route_value - pack_value
++                for roundtrip_value, unpack_value, route_value, pack_value in zip(
++                    roundtrip_ms,
++                    request_unpack_ms,
++                    server_route_ms,
++                    response_pack_ms,
++                    strict=True,
++                )
++            )
++            if len(request_unpack_ms) == len(server_route_ms) == len(response_pack_ms) == len(roundtrip_ms)
++            else None
++        ),
++        "latency_gate": {
++            "p95_max_ms": args.p95_gate_ms,
++            "absolute_max_ms": args.max_gate_ms,
++            "pass": latency_gate_pass,
++        },
++        "reference_report": str(args.reference_report.resolve()) if args.reference_report else None,
++        "reference_parity_atol": args.parity_atol,
++        "reference_max_abs": reference_max_abs,
++        "action_reference": action_reference,
++    }
++    report["action_reference_sha256"] = _canonical_sha256(action_reference)
++    return report
++
++
++def build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--host", default="192.168.1.113")
++    parser.add_argument("--port", type=int, default=10098)
++    parser.add_argument("--transport", choices=("websocket", "tcp"), default="websocket")
++    parser.add_argument("--episode", type=Path, required=True)
++    parser.add_argument("--checkpoint-sha256", required=True)
++    parser.add_argument("--seed", type=int, default=42)
++    parser.add_argument("--warmup-calls", type=int, default=5)
++    parser.add_argument("--measured-calls", type=int, default=30)
++    parser.add_argument("--p95-gate-ms", type=float, default=180.0)
++    parser.add_argument("--max-gate-ms", type=float, default=220.0)
++    parser.add_argument("--require-latency-gate", action="store_true")
++    parser.add_argument("--expect-optimization")
++    parser.add_argument("--reference-report", type=Path)
++    parser.add_argument("--parity-atol", type=float, default=0.0)
++    parser.add_argument("--report", type=Path, required=True)
++    return parser
++
++
++def main() -> int:
++    args = build_parser().parse_args()
++    try:
++        report = run(args)
++        exit_code = 0
++    except Exception as exc:
++        report = {
++            "status": "FAIL",
++            "error_type": type(exc).__name__,
++            "error": str(exc),
++            "safety": SAFETY,
++        }
++        exit_code = 1
++    rendered = json.dumps(report, indent=2, sort_keys=True)
++    print(rendered)
++    args.report.parent.mkdir(parents=True, exist_ok=True)
++    args.report.write_text(rendered + "\n", encoding="utf-8")
++    print(f"REPORT_PATH={args.report}")
++    return exit_code
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/examples/realRobots/Franka/rl/qwen_backbone_inference.py b/examples/realRobots/Franka/rl/qwen_backbone_inference.py
+new file mode 100644
+index 0000000..c496982
+--- /dev/null
++++ b/examples/realRobots/Franka/rl/qwen_backbone_inference.py
+@@ -0,0 +1,42 @@
++"""Inference-only Qwen-VL path that bypasses only the unused LM projection."""
++
++from __future__ import annotations
++
++from types import MethodType
++from typing import Any
++
++
++class QwenBackboneInferenceError(RuntimeError):
++    """Raised when the expected Qwen conditional-generation layout is absent."""
++
++
++def install_qwen_lm_head_bypass(qwen_vl_interface: Any) -> None:
++    """Keep the baseline Qwen forward exact while skipping unused logits.
++
++    StarVLA consumes ``CausalLMOutput.hidden_states[-1]`` and never reads
++    ``logits``.  Calling a nested Qwen backbone directly proved unsafe because
++    wrapper and Transformers versions can differ in how they prepare and
++    capture multimodal hidden states.  Instead, preserve the authoritative
++    conditional-generation forward byte-for-byte and replace only
++    ``lm_head.forward`` with a zero-compute empty view.
++    """
++
++    causal_model = getattr(qwen_vl_interface, "model", None)
++    lm_head = getattr(causal_model, "lm_head", None)
++    if lm_head is None or not callable(getattr(lm_head, "forward", None)):
++        raise QwenBackboneInferenceError("QwenGR00T fast path requires model.lm_head.forward")
++    if getattr(lm_head, "_qwengroot_lm_head_bypass_v1", False):
++        raise QwenBackboneInferenceError("Qwen LM-head bypass is already installed")
++
++    original_forward = lm_head.forward
++
++    def empty_logits_forward(lm_head_self: Any, hidden_states: Any) -> Any:
++        del lm_head_self
++        return hidden_states[..., :0]
++
++    lm_head._qwengroot_original_forward = original_forward
++    lm_head._qwengroot_lm_head_bypass_v1 = True
++    lm_head.forward = MethodType(empty_logits_forward, lm_head)
++
++
++__all__ = ["QwenBackboneInferenceError", "install_qwen_lm_head_bypass"]
+diff --git a/examples/realRobots/Franka/rl/qwengroot_low_jitter_tcp_server.py b/examples/realRobots/Franka/rl/qwengroot_low_jitter_tcp_server.py
+new file mode 100644
+index 0000000..9ac88a7
+--- /dev/null
++++ b/examples/realRobots/Franka/rl/qwengroot_low_jitter_tcp_server.py
+@@ -0,0 +1,151 @@
++#!/usr/bin/env python3
++"""Persistent length-prefixed TCP transport for low-jitter shadow inference."""
++
++from __future__ import annotations
++
++import socket
++import struct
++import time
++from typing import Any, Mapping
++
++try:
++    from .qwengroot_low_jitter_websocket_server import (
++        LowJitterWebsocketPolicyServer,
++        _pack_array,
++        _unpack_array,
++    )
++except ImportError:  # Direct execution on the GPU host.
++    from qwengroot_low_jitter_websocket_server import (
++        LowJitterWebsocketPolicyServer,
++        _pack_array,
++        _unpack_array,
++    )
++
++_FRAME_HEADER = struct.Struct("!I")
++_MAX_FRAME_BYTES = 32 * 1024 * 1024
++
++
++def _recv_exact(connection: socket.socket, size: int) -> bytes | None:
++    chunks = bytearray()
++    while len(chunks) < size:
++        block = connection.recv(size - len(chunks))
++        if not block:
++            if not chunks:
++                return None
++            raise ConnectionError("TCP frame ended before the requested byte count")
++        chunks.extend(block)
++    return bytes(chunks)
++
++
++def _recv_frame(connection: socket.socket) -> bytes | None:
++    payload, _ = _recv_frame_with_timing(connection)
++    return payload
++
++
++def _recv_frame_with_timing(
++    connection: socket.socket,
++) -> tuple[bytes | None, dict[str, float | int]]:
++    header_started = time.perf_counter()
++    header = _recv_exact(connection, _FRAME_HEADER.size)
++    header_finished = time.perf_counter()
++    if header is None:
++        return None, {
++            "request_header_wait_s": header_finished - header_started,
++            "request_payload_receive_s": 0.0,
++            "request_frame_receive_s": header_finished - header_started,
++            "request_frame_bytes": 0,
++        }
++    (size,) = _FRAME_HEADER.unpack(header)
++    if size <= 0 or size > _MAX_FRAME_BYTES:
++        raise ValueError(f"Invalid TCP frame size: {size}")
++    payload_started = time.perf_counter()
++    payload = _recv_exact(connection, size)
++    payload_finished = time.perf_counter()
++    if payload is None:
++        raise ConnectionError("TCP frame payload is missing")
++    return payload, {
++        "request_header_wait_s": header_finished - header_started,
++        "request_payload_receive_s": payload_finished - payload_started,
++        "request_frame_receive_s": payload_finished - header_started,
++        "request_frame_bytes": size,
++    }
++
++
++def _send_frame(connection: socket.socket, payload: bytes) -> None:
++    if not payload or len(payload) > _MAX_FRAME_BYTES:
++        raise ValueError(f"Invalid outbound TCP frame size: {len(payload)}")
++    connection.sendall(_FRAME_HEADER.pack(len(payload)) + payload)
++
++
++class LowJitterTcpPolicyServer(LowJitterWebsocketPolicyServer):
++    """Single-client-at-a-time TCP server using the established MsgPack schema."""
++
++    def __init__(
++        self,
++        *,
++        policy: Any,
++        host: str,
++        port: int,
++        idle_timeout: int = -1,
++        metadata: Mapping[str, Any] | None = None,
++    ) -> None:
++        super().__init__(
++            policy=policy,
++            host=host,
++            port=port,
++            idle_timeout=idle_timeout,
++            metadata=metadata,
++        )
++
++    def serve_forever(self) -> None:
++        import msgpack
++
++        packer = msgpack.Packer(default=_pack_array)
++        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
++            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
++            listener.bind((self._host, self._port))
++            listener.listen(8)
++            listener.settimeout(5.0)
++            while True:
++                if self._idle_timeout > 0 and time.monotonic() - self._last_active > self._idle_timeout:
++                    return
++                try:
++                    connection, _ = listener.accept()
++                except TimeoutError:
++                    continue
++                with connection:
++                    connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
++                    connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
++                    _send_frame(connection, packer.pack(self._metadata))
++                    while True:
++                        frame, receive_timing = _recv_frame_with_timing(connection)
++                        if frame is None:
++                            break
++                        received = time.perf_counter()
++                        message = msgpack.unpackb(frame, object_hook=_unpack_array)
++                        unpacked = time.perf_counter()
++                        self._last_active = time.monotonic()
++                        response = self._route_message(message)
++                        routed = time.perf_counter()
++                        timing = response.setdefault("timing", {})
++                        timing.update(
++                            {
++                                **receive_timing,
++                                "request_unpack_s": unpacked - received,
++                                "server_route_s": routed - unpacked,
++                                "response_pack_probe_s": 0.0,
++                            }
++                        )
++                        pack_started = time.perf_counter()
++                        packer.pack(response)
++                        timing["response_pack_probe_s"] = time.perf_counter() - pack_started
++                        _send_frame(connection, packer.pack(response))
++
++
++__all__ = [
++    "LowJitterTcpPolicyServer",
++    "_recv_exact",
++    "_recv_frame",
++    "_recv_frame_with_timing",
++    "_send_frame",
++]
+diff --git a/examples/realRobots/Franka/rl/qwengroot_low_jitter_websocket_server.py b/examples/realRobots/Franka/rl/qwengroot_low_jitter_websocket_server.py
+new file mode 100644
+index 0000000..e3112f2
+--- /dev/null
++++ b/examples/realRobots/Franka/rl/qwengroot_low_jitter_websocket_server.py
+@@ -0,0 +1,182 @@
++#!/usr/bin/env python3
++"""Small auditable WebSocket transport for latency-sensitive shadow policy calls."""
++
++from __future__ import annotations
++
++import asyncio
++import logging
++import socket
++import time
++import traceback
++from typing import Any, Mapping
++
++import numpy as np
++
++
++def _pack_array(value: Any) -> Any:
++    if isinstance(value, (np.ndarray, np.generic)) and value.dtype.kind in {"V", "O", "c"}:
++        raise ValueError(f"Unsupported dtype: {value.dtype}")
++    if isinstance(value, np.ndarray):
++        return {
++            b"__ndarray__": True,
++            b"data": value.tobytes(),
++            b"dtype": value.dtype.str,
++            b"shape": value.shape,
++        }
++    if isinstance(value, np.generic):
++        return {
++            b"__npgeneric__": True,
++            b"data": value.item(),
++            b"dtype": value.dtype.str,
++        }
++    return value
++
++
++def _unpack_array(value: dict[Any, Any]) -> Any:
++    if b"__ndarray__" in value:
++        return np.ndarray(
++            buffer=value[b"data"],
++            dtype=np.dtype(value[b"dtype"]),
++            shape=value[b"shape"],
++        )
++    if b"__npgeneric__" in value:
++        return np.dtype(value[b"dtype"]).type(value[b"data"])
++    return value
++
++
++class LowJitterWebsocketPolicyServer:
++    """Single-process shadow transport with no per-request logging."""
++
++    def __init__(
++        self,
++        *,
++        policy: Any,
++        host: str,
++        port: int,
++        idle_timeout: int = -1,
++        metadata: Mapping[str, Any] | None = None,
++    ) -> None:
++        self._policy = policy
++        self._host = str(host)
++        self._port = int(port)
++        self._idle_timeout = int(idle_timeout)
++        self._metadata = dict(metadata or {})
++        self._last_active = time.monotonic()
++
++    def serve_forever(self) -> None:
++        asyncio.run(self.run())
++
++    async def run(self) -> None:
++        import websockets.asyncio.server
++
++        async with websockets.asyncio.server.serve(
++            self._handler,
++            self._host,
++            self._port,
++            compression=None,
++            max_size=None,
++            max_queue=1,
++            ping_interval=None,
++            ping_timeout=None,
++        ) as server:
++            logging.warning("Low-jitter shadow server listening on %s:%d", self._host, self._port)
++            if self._idle_timeout > 0:
++                await self._idle_watchdog(server)
++            else:
++                await server.serve_forever()
++
++    async def _idle_watchdog(self, server: Any) -> None:
++        while True:
++            await asyncio.sleep(5)
++            if time.monotonic() - self._last_active > self._idle_timeout:
++                server.close()
++                await server.wait_closed()
++                return
++
++    @staticmethod
++    def _configure_socket(websocket: Any) -> None:
++        transport = getattr(websocket, "transport", None)
++        sock = transport.get_extra_info("socket") if transport is not None else None
++        if sock is not None:
++            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
++            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
++
++    async def _handler(self, websocket: Any) -> None:
++        import msgpack
++        import websockets
++
++        self._configure_socket(websocket)
++        packer = msgpack.Packer(default=_pack_array)
++        await websocket.send(packer.pack(self._metadata))
++        while True:
++            try:
++                frame = await websocket.recv()
++                received = time.perf_counter()
++                if isinstance(frame, str):
++                    raise TypeError("Shadow transport accepts binary MsgPack frames only")
++                message = msgpack.unpackb(frame, object_hook=_unpack_array)
++                unpacked = time.perf_counter()
++                self._last_active = time.monotonic()
++                response = self._route_message(message)
++                routed = time.perf_counter()
++                timing = response.setdefault("timing", {})
++                timing.update(
++                    {
++                        "request_unpack_s": unpacked - received,
++                        "server_route_s": routed - unpacked,
++                        "response_pack_probe_s": 0.0,
++                    }
++                )
++                pack_started = time.perf_counter()
++                packer.pack(response)
++                timing["response_pack_probe_s"] = time.perf_counter() - pack_started
++                await websocket.send(packer.pack(response))
++            except websockets.ConnectionClosed:
++                return
++            except Exception:
++                await websocket.send(traceback.format_exc())
++                await websocket.close(code=1011, reason="Internal shadow transport error")
++                raise
++
++    def _route_message(self, message: Mapping[str, Any]) -> dict[str, Any]:
++        request_id = message.get("request_id", "default")
++        message_type = message.get("type", "infer")
++        payload = message.get("payload", message)
++        if message_type == "ping":
++            return {"status": "ok", "ok": True, "type": "ping", "request_id": request_id}
++        if message_type not in {"infer", "predict_action"}:
++            return {
++                "status": "error",
++                "ok": False,
++                "type": "unknown",
++                "request_id": request_id,
++                "error": {"message": f"Unsupported message type {message_type!r}"},
++            }
++        if not isinstance(payload, Mapping):
++            return {
++                "status": "error",
++                "ok": False,
++                "type": "inference_result",
++                "request_id": request_id,
++                "error": {"message": "Payload must be a mapping"},
++            }
++        try:
++            data = self._policy.predict_action(**dict(payload))
++        except Exception as exc:
++            return {
++                "status": "error",
++                "ok": False,
++                "type": "inference_result",
++                "request_id": request_id,
++                "error": {"message": str(exc)},
++            }
++        return {
++            "status": "ok",
++            "ok": True,
++            "type": "inference_result",
++            "request_id": request_id,
++            "data": data,
++        }
++
++
++__all__ = ["LowJitterWebsocketPolicyServer"]
+diff --git a/tests/test_qwen_backbone_inference.py b/tests/test_qwen_backbone_inference.py
+new file mode 100644
+index 0000000..4a2be15
+--- /dev/null
++++ b/tests/test_qwen_backbone_inference.py
+@@ -0,0 +1,60 @@
++"""Lightweight contract tests for the Qwen-VL LM-head bypass."""
++
++from __future__ import annotations
++
++import unittest
++from importlib.util import module_from_spec, spec_from_file_location
++from pathlib import Path
++from types import SimpleNamespace
++
++_MODULE_PATH = Path("examples/realRobots/Franka/rl/qwen_backbone_inference.py").resolve()
++_SPEC = spec_from_file_location("qwen_backbone_inference_under_test", _MODULE_PATH)
++assert _SPEC is not None and _SPEC.loader is not None
++_MODULE = module_from_spec(_SPEC)
++_SPEC.loader.exec_module(_MODULE)
++QwenBackboneInferenceError = _MODULE.QwenBackboneInferenceError
++install_qwen_lm_head_bypass = _MODULE.install_qwen_lm_head_bypass
++
++
++class _HiddenStates:
++    def __init__(self) -> None:
++        self.slice_key = None
++
++    def __getitem__(self, key):
++        self.slice_key = key
++        return "empty-logits"
++
++
++class _LMHead:
++    def forward(self, hidden_states):
++        return ("projected-logits", hidden_states)
++
++
++class QwenBackboneInferenceTest(unittest.TestCase):
++    def test_bypasses_only_lm_head_projection(self):
++        lm_head = _LMHead()
++        original_forward = lm_head.forward
++        interface = SimpleNamespace(model=SimpleNamespace(lm_head=lm_head))
++        hidden_states = _HiddenStates()
++
++        install_qwen_lm_head_bypass(interface)
++
++        self.assertEqual(lm_head.forward(hidden_states), "empty-logits")
++        self.assertEqual(hidden_states.slice_key, (Ellipsis, slice(None, 0, None)))
++        self.assertTrue(lm_head._qwengroot_lm_head_bypass_v1)
++        self.assertEqual(lm_head._qwengroot_original_forward, original_forward)
++
++    def test_missing_lm_head_fails_closed(self):
++        with self.assertRaisesRegex(QwenBackboneInferenceError, "model.lm_head.forward"):
++            install_qwen_lm_head_bypass(SimpleNamespace(model=object()))
++
++    def test_double_install_fails_closed(self):
++        interface = SimpleNamespace(model=SimpleNamespace(lm_head=_LMHead()))
++        install_qwen_lm_head_bypass(interface)
++
++        with self.assertRaisesRegex(QwenBackboneInferenceError, "already installed"):
++            install_qwen_lm_head_bypass(interface)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_qwengroot_low_jitter_server.py b/tests/test_qwengroot_low_jitter_server.py
+new file mode 100644
+index 0000000..6b59d48
+--- /dev/null
++++ b/tests/test_qwengroot_low_jitter_server.py
+@@ -0,0 +1,54 @@
++"""Contract tests for the candidate-local low-jitter shadow transport."""
++
++from __future__ import annotations
++
++import unittest
++
++from examples.realRobots.Franka.rl.qwengroot_low_jitter_websocket_server import (
++    LowJitterWebsocketPolicyServer,
++)
++
++
++class _Policy:
++    def __init__(self) -> None:
++        self.calls = []
++
++    def predict_action(self, **payload):
++        self.calls.append(payload)
++        return {"action_execution": "NOT_RUN"}
++
++
++class LowJitterServerTest(unittest.TestCase):
++    def test_routes_ping_without_calling_policy(self):
++        policy = _Policy()
++        server = LowJitterWebsocketPolicyServer(policy=policy, host="127.0.0.1", port=10099)
++
++        response = server._route_message({"type": "ping", "request_id": "p0", "payload": {}})
++
++        self.assertTrue(response["ok"])
++        self.assertEqual(response["request_id"], "p0")
++        self.assertEqual(policy.calls, [])
++
++    def test_routes_prediction_payload_exactly_once(self):
++        policy = _Policy()
++        server = LowJitterWebsocketPolicyServer(policy=policy, host="127.0.0.1", port=10099)
++
++        response = server._route_message(
++            {"type": "predict_action", "request_id": "r0", "payload": {"mode": "shadow"}}
++        )
++
++        self.assertTrue(response["ok"])
++        self.assertEqual(response["data"]["action_execution"], "NOT_RUN")
++        self.assertEqual(policy.calls, [{"mode": "shadow"}])
++
++    def test_rejects_unknown_message_type(self):
++        server = LowJitterWebsocketPolicyServer(policy=_Policy(), host="127.0.0.1", port=10099)
++
++        response = server._route_message({"type": "execute", "request_id": "bad", "payload": {}})
++
++        self.assertFalse(response["ok"])
++        self.assertEqual(response["type"], "unknown")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_qwengroot_low_jitter_tcp.py b/tests/test_qwengroot_low_jitter_tcp.py
+new file mode 100644
+index 0000000..c16e1ff
+--- /dev/null
++++ b/tests/test_qwengroot_low_jitter_tcp.py
+@@ -0,0 +1,49 @@
++"""Framing tests for the low-jitter shadow TCP transport."""
++
++from __future__ import annotations
++
++import socket
++import unittest
++
++from examples.realRobots.Franka.rl.qwengroot_low_jitter_tcp_server import (
++    _recv_frame,
++    _recv_frame_with_timing,
++    _send_frame,
++)
++
++
++class LowJitterTcpTest(unittest.TestCase):
++    def test_roundtrips_one_length_prefixed_frame(self):
++        left, right = socket.socketpair()
++        try:
++            _send_frame(left, b"shadow-payload")
++            self.assertEqual(_recv_frame(right), b"shadow-payload")
++        finally:
++            left.close()
++            right.close()
++
++    def test_clean_close_returns_none_before_header(self):
++        left, right = socket.socketpair()
++        left.close()
++        try:
++            self.assertIsNone(_recv_frame(right))
++        finally:
++            right.close()
++
++    def test_timed_frame_reports_payload_size_and_nonnegative_stages(self):
++        left, right = socket.socketpair()
++        try:
++            _send_frame(left, b"timed-shadow-payload")
++            payload, timing = _recv_frame_with_timing(right)
++            self.assertEqual(payload, b"timed-shadow-payload")
++            self.assertEqual(timing["request_frame_bytes"], len(payload))
++            self.assertGreaterEqual(timing["request_header_wait_s"], 0.0)
++            self.assertGreaterEqual(timing["request_payload_receive_s"], 0.0)
++            self.assertGreaterEqual(timing["request_frame_receive_s"], 0.0)
++        finally:
++            left.close()
++            right.close()
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -1,0 +1,43 @@
+[submodule "src/crisp_controllers"]
+	path = src/crisp_controllers
+	url = https://github.com/utiasDSL/crisp_controllers.git
+
+[submodule "src/crisp_controllers_demos"]
+	path = src/crisp_controllers_demos
+	url = https://github.com/utiasDSL/crisp_controllers_demos.git
+
+[submodule "src/crisp_gym"]
+	path = src/crisp_gym
+	url = https://github.com/utiasDSL/crisp_gym.git
+
+[submodule "src/crisp_py"]
+	path = src/crisp_py
+	url = https://github.com/utiasDSL/crisp_py.git
+
+[submodule "src/franka_broadcasters"]
+	path = src/franka_broadcasters
+	url = https://github.com/danielsanjosepro/franka_broadcasters.git
+
+[submodule "src/libfranka"]
+	path = src/libfranka
+	url = https://github.com/frankarobotics/libfranka.git
+
+[submodule "src/piper-vr-teleop"]
+	path = src/piper-vr-teleop
+	url = https://github.com/iliyas-tleuzhan/piper-vr-teleop.git
+
+[submodule "third_party/RLinf"]
+	path = third_party/RLinf
+	url = https://github.com/RLinf/RLinf.git
+
+[submodule "third_party/lingbot-vla"]
+	path = third_party/lingbot-vla
+	url = https://github.com/robbyant/lingbot-vla.git
+
+[submodule "third_party/starVLA"]
+	path = third_party/starVLA
+	url = https://github.com/starVLA/starVLA.git
+
+[submodule "third_party/starVLA_rl_libero"]
+	path = third_party/starVLA_rl_libero
+	url = https://github.com/starVLA/starVLA.git

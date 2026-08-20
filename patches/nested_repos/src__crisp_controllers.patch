@@ -1,0 +1,14 @@
+diff --git a/docs/misc/demos.md b/docs/misc/demos.md
+index 295109e..cb23dd0 100644
+--- a/docs/misc/demos.md
++++ b/docs/misc/demos.md
+@@ -96,6 +96,9 @@ For the cameras, you can run:
+ 
+ ```bash
+ docker compose up launch_camera
++ros2 launch crisp_controllers_robot_demos franka.launch.py \
++  arm_id:=fr3 robot_ip:=172.16.0.2 use_fake_hardware:=false \
++  use_rviz:=True 
+ ```
+ 
+ ...and in case you are running a realsense:
