@@ -11,14 +11,14 @@ DOCKERHUB_USER="$1"
 BACKUP_TAG="${2:-20260820}"
 
 images=(
-  "crisp_controllers_demos:franka-overlay:franka-overlay-${BACKUP_TAG}"
-  "franka:latest:franka-base-${BACKUP_TAG}"
-  "realsense_ros2:latest:realsense-ros2-${BACKUP_TAG}"
+  "crisp_controllers_demos:franka-overlay|franka-overlay-${BACKUP_TAG}"
+  "franka:latest|franka-base-${BACKUP_TAG}"
+  "realsense_ros2:latest|realsense-ros2-${BACKUP_TAG}"
 )
 
 for spec in "${images[@]}"; do
-  source_image="${spec%:*:*}"
-  target_tag="${spec##*:}"
+  source_image="${spec%%|*}"
+  target_tag="${spec##*|}"
   target_image="${DOCKERHUB_USER}/franka-ws:${target_tag}"
 
   echo "tagging ${source_image} -> ${target_image}"
@@ -31,6 +31,6 @@ done
 
 echo "DockerHub backup complete:"
 for spec in "${images[@]}"; do
-  target_tag="${spec##*:}"
+  target_tag="${spec##*|}"
   echo "  ${DOCKERHUB_USER}/franka-ws:${target_tag}"
 done
