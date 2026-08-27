@@ -160,12 +160,16 @@ cd /absolute/path/to/franka_ws/third_party/starVLA
 
 python deployment/model_server/server_policy.py \
   --ckpt_path /absolute/path/to/checkpoint/pytorch_model.pt \
+  --base_vlm_path /absolute/path/to/Qwen3-VL-4B-Instruct \
   --port 10096 \
   --use_bf16 \
   --idle_timeout -1
 ```
 
 The checkpoint must include its matching model configuration and normalization statistics. Image count/order, image preprocessing, proprioceptive state, action representation, and normalization must match training.
+`--base_vlm_path` overrides legacy relative Qwen paths saved in training
+configs and should point to the existing local base-model directory on the GPU
+host.
 
 ### 2. Check connectivity
 

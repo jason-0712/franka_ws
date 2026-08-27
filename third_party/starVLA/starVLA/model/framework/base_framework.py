@@ -206,6 +206,7 @@ class baseframework(PreTrainedModel):
     def from_pretrained(
         cls,
         pretrained_checkpoint: str,
+        base_vlm_path: str | None = None,
         **kwargs,
     ) -> None:
         """
@@ -235,6 +236,13 @@ class baseframework(PreTrainedModel):
         config = dict_to_namespace(model_config)
         model_config = config
         model_config.trainer.pretrained_checkpoint = None
+
+        # Training configs often record a CWD-relative path such as
+        # ``playground/Pretrained_models/Qwen3-VL-4B-Instruct``.  A vendored
+        # deployment checkout necessarily has a different working directory,
+        # so allow the server to provide an explicit, validated local path.
+        if base_vlm_path is not None:
+            model_config.framework.qwenvl.base_vlm = str(base_vlm_path)
 
         FrameworkModel = build_framework(cfg=model_config)
         # set for action un-norm

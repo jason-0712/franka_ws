@@ -22,6 +22,7 @@ Exposed API:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -42,11 +43,29 @@ class PolicyServerWrapper:
         device: str = "cuda",
         use_bf16: bool = False,
         unnorm_key: Optional[str] = None,
+        base_vlm_path: Optional[str] = None,
     ) -> None:
         self._ckpt_path = str(ckpt_path)
 
+        resolved_base_vlm_path: Optional[str] = None
+        if base_vlm_path is not None:
+            candidate = Path(base_vlm_path).expanduser()
+            if not candidate.is_dir():
+                raise FileNotFoundError(
+                    "PolicyServerWrapper: --base_vlm_path is not a directory: "
+                    f"{candidate}"
+                )
+            resolved_base_vlm_path = str(candidate.resolve())
+            logging.info(
+                "PolicyServerWrapper: overriding checkpoint base VLM with %s",
+                resolved_base_vlm_path,
+            )
+
         logging.info("PolicyServerWrapper: loading framework from %s", self._ckpt_path)
-        framework = baseframework.from_pretrained(self._ckpt_path)
+        framework = baseframework.from_pretrained(
+            self._ckpt_path,
+            base_vlm_path=resolved_base_vlm_path,
+        )
         if use_bf16:
             framework = framework.to(torch.bfloat16)
         framework = framework.to(device).eval()

@@ -92,6 +92,24 @@ class VendoredStarVLARuntimeTest(unittest.TestCase):
             server.index("from deployment.model_server.policy_wrapper import"),
         )
 
+    def test_server_supports_explicit_base_vlm_path(self):
+        server = (
+            RUNTIME / "deployment/model_server/server_policy.py"
+        ).read_text(encoding="utf-8")
+        wrapper = (
+            RUNTIME / "deployment/model_server/policy_wrapper.py"
+        ).read_text(encoding="utf-8")
+        framework = (
+            RUNTIME / "starVLA/model/framework/base_framework.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"--base_vlm_path"', server)
+        self.assertIn("base_vlm_path=args.base_vlm_path", server)
+        self.assertIn("candidate.is_dir()", wrapper)
+        self.assertIn(
+            "model_config.framework.qwenvl.base_vlm = str(base_vlm_path)",
+            framework,
+        )
+
     def test_runtime_is_pinned_to_validated_python(self):
         pyproject = (RUNTIME / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('requires-python = ">=3.10,<3.11"', pyproject)

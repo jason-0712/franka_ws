@@ -67,6 +67,7 @@ python deployment/model_server/check_runtime.py
 
 python deployment/model_server/server_policy.py \
   --ckpt_path /absolute/path/to/final_model/pytorch_model.pt \
+  --base_vlm_path /absolute/path/to/Qwen3-VL-4B-Instruct \
   --port 10096 \
   --use_bf16 \
   --idle_timeout -1
@@ -79,3 +80,7 @@ working server's CUDA PyTorch build merely to fix one missing module.
 
 The checkpoint must remain beside its matching `config.yaml` and
 `dataset_statistics.json` in the layout produced by StarVLA training.
+Use `--base_vlm_path` when that config contains a training-CWD-relative value
+such as `playground/Pretrained_models/Qwen3-VL-4B-Instruct`. Without the
+override, Transformers interprets a missing relative path as a Hugging Face
+repository identifier and raises `HFValidationError`.
