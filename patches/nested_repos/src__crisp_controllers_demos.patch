@@ -10,51 +10,6 @@ index 554e45f..adb1219 100644
            </xacro:unless>
            <xacro:if value="${use_fake_hardware}">
              <plugin>crisp_mujoco_sim/Simulator</plugin>
-diff --git a/crisp_controllers_robot_demos/crisp_controllers_robot_demos/__pycache__/__init__.cpython-310.pyc b/crisp_controllers_robot_demos/crisp_controllers_robot_demos/__pycache__/__init__.cpython-310.pyc
-index a3e39145df17e77b731b8d4b27bab5f83ee1ea42..c04dd2c38261c6e80dcc6c65a990d2c684b10c75 100644
-GIT binary patch
-delta 20
-acmdnPxQCG^pO=@50SNwYlgpgQvjG4#Dg~ne
-
-delta 20
-acmdnPxQCG^pO=@50SKZdyJbw|*#H1AnFRs>
-
-diff --git a/crisp_controllers_robot_demos/crisp_controllers_robot_demos/__pycache__/crisp_py_franka_hand_adapter.cpython-310.pyc b/crisp_controllers_robot_demos/crisp_controllers_robot_demos/__pycache__/crisp_py_franka_hand_adapter.cpython-310.pyc
-index e3956aa249c6b0f73775065eed3a4e2c0ff9e72a..ff6d6bc112680a05e63fa8a1d32dd13a66166373 100644
-GIT binary patch
-delta 1154
-zcmZuxO-vI(6yDix%d)gfOIu1?{?S8$APVv$7)&r2V{DZoqKR3T&H^o^t+NYJQi2Iw
-z{mb0+(%ua5AZcPedegg!haQZcOuTDiG{N__f-!ND_vM>!-upUzZ`!Y;KgQL($D;_a
-zo?b{~UbXM5Q!@EdiOY8h8LYgmKQDQQ;gEG9Od_1+QMHqt=9B6y=W4)p4#knmb9I%F
-zI1hMNNP=&9_k3qSkF!=hy^1i)$9!$%T4mlhKpN&ynXk!@ny!1tkd7l@8JpnWn{IcU
-zKw6IwL>NVgBh;$-vuG=S;(t$Gb0ctZn+ioiQ>=!fP;yh5)|bVMXNQ2M7KKcs<pmTW
-zd{&d?-w~+tz)7GY6R?7Sjw4lqie~T#QE<vgQOs#6i<nyqmxWS<y32$JR7eUjPrTZa
-zVrjFW74C6=aH*#n%omKDmddZK={c&c<g-*WjTGy}TQ?${<oAPpB+6d|=acsL!zNU{
-ze<}>BrLuX`pw*^-jLdW{Ww2YA>Z3*~t209@=uBTTEQ3{@8+vx#V2g0fL(Ti`BS755
-zCAuI~Q6UO4A`;LJB#D1)e&?~fd<F7i9=6OYp^4#BXzntWmh#MEIo#A0))%vBbA=7T
-zt~N+}nr*l(091H)OMH6}SV{yqToMom#59Dt2T&v#!E{oRv>6q{!j@PRsbiI};}j<Z
-zkrB-v=&%DiEKvzN44Sj#DhtqSC*+8BJ?8Zyv+8z)EeGTz2qo+AIEt{*fWwENOj^)D
-zUUjnMk*({<w%)d_tJxmbVQoz2Vz_%d&IsIl83NX)sm;(dOeLLL?wnzIZdLDGX6Zt~
-zU;}fTp#%*4KPNLWr7BU~(pefT*a|`j;SK^i*IqF;&Yqn8YlulK3WCT6xfTvy-oQh<
-z=YJcY1?>%l*$?27B$%%3!1<~~0hD0o7&Yz{YpOz|U;JgbzheQ4*bRi62<-?sN``*{
-zEX#j}+qxK1d&nBFhY+R=Aj6xIk2QOk#>XR<+<hQbrF1TBf$%so<o|q>2-i@ETV%WZ
-cL!_Pb@o$k*16r|NgauxTPS+)687_738v)$`j{pDw
-
-delta 934
-zcmZ9L&rcIU6vt<#L%VFd+ZJf~u|<LCp=dyU2?)voH5x<x0fKU1t=&=<Xp6IJ;-RDm
-zk4BA|lNW4n#)E`3@nB3m>YZCp#*2x6fQc~?-`fT>PVzo^?>pbw*?F`3bMpJRUeq*|
-z!1z{vx%M`(r_U%fS4%06C>^YQYQD%LBQPm?5mSh1Y3Mz4R8H%+x*7ti=MfhWGl;R;
-zYkh;#IoTFjqba!^c@v!kJtY!2djoM(PDH!uLTxcRK!fwB+-}IvTb3f@m`)&YnK&nZ
-zwA?!}fN3)#hB%9uL;PL6D0dU>@<r=D-I3Y0tIH*_uDU@Wg9y2rt3M`|^0bK(sKagq
-z=sQw*iI~w6skB(lpmPH~tyPBJN?VmwVwPH^lvre*B!jXq_8=g_xcwRVE_RB><=5C^
-z%zH;XNL{rZGqYKA>_SdHiSNa6CPe+r51})as*rIem)k#U-WjjMd{PrxIoL5ZI)qQ~
-zXIEE?!WA|afvt!4H*IH43`5muqu0xBEH?nVa;GCz9)v8z0Efc|3D&a^P61G&>%^j+
-zWSf<k#Wtug;Fz?+s>I8DPNU{k0!Q^hOMF(-Jn_6-3>|u%5y*UE%&VI`FSf7MGvk88
-zNc!db&c3psuyqas#+R9e%c-Ql&aJeY7FkflNyIAR=q{5!VW5B~s)uvJ-rC9vGgHjx
-z(*^7Q2H=xFKsY@Bl`CAK?0_@&TjeTMn4<kthJMM9U8j#Pfm7T;+(jHiU>^nk4I(F1
-zqq{ecsn_8Z$euws3P6F2RC?l?SdmwZYoUIS>fA2aE(ouTk>UL#BlT02hL|X$MKR5M
-o+Af%8GF}gurd7<Crog)q{gNjtLEOW0iY54rX9JfMMWy`U54=#qasU7T
-
 diff --git a/crisp_controllers_robot_demos/crisp_controllers_robot_demos/crisp_py_franka_hand_adapter.py b/crisp_controllers_robot_demos/crisp_controllers_robot_demos/crisp_py_franka_hand_adapter.py
 index adacb27..2f9a06d 100644
 --- a/crisp_controllers_robot_demos/crisp_controllers_robot_demos/crisp_py_franka_hand_adapter.py

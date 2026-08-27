@@ -26,18 +26,7 @@
 	path = src/piper-vr-teleop
 	url = https://github.com/iliyas-tleuzhan/piper-vr-teleop.git
 
-[submodule "third_party/RLinf"]
-	path = third_party/RLinf
-	url = https://github.com/RLinf/RLinf.git
-
-[submodule "third_party/lingbot-vla"]
-	path = third_party/lingbot-vla
-	url = https://github.com/robbyant/lingbot-vla.git
-
 [submodule "third_party/starVLA"]
 	path = third_party/starVLA
 	url = https://github.com/starVLA/starVLA.git
 
-[submodule "third_party/starVLA_rl_libero"]
-	path = third_party/starVLA_rl_libero
-	url = https://github.com/starVLA/starVLA.git
