@@ -38,6 +38,7 @@ class VendoredStarVLARuntimeTest(unittest.TestCase):
         for marker in (
             "quest3_franka_dualcam_pickplace_74eps",
             "quest3_franka_pick_cube_place_box_100eps_all_qwen",
+            "quest3_franka_dualcam_replay_94eps_v1",
             "quest3_franka_delta_eef",
             "quest3_franka_dualcam_delta_eef",
             "crisp_franka_abs_joints",

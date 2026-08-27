@@ -534,3 +534,14 @@ DATASET_NAMED_MIXTURES["quest3_franka_pick_cube_place_box_100eps_lateral11x3_wei
         "quest3_franka_pick_cube_place_box_100eps_all_qwen"
     ]
 ]
+
+# Replay94 is the successful 74-episode dataset plus 10 front and 10 back
+# demonstrations.  The policy server needs this name to reconstruct the
+# training-time normalization contract when loading Replay94 checkpoints.
+DATASET_NAMED_MIXTURES["quest3_franka_dualcam_replay_94eps_v1"] = [
+    (
+        "quest3_franka_dualcam_replay_94eps_v1",
+        1.0,
+        "quest3_franka_dualcam_delta_eef",
+    ),
+]
