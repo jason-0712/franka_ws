@@ -32,7 +32,7 @@ The policy server performs neural-network inference on a GPU machine. The ROS cl
 | `src/piper-vr-teleop` | Quest 3 OpenXR/ADB transport and native passthrough application. |
 | `src/camera_driver` | Dual-RealSense Docker configuration. |
 | `src/franka_ros2`, `src/franka_description`, `src/libfranka` | Franka ROS 2 and hardware dependencies. |
-| `third_party/starVLA` | StarVLA policy framework and WebSocket policy server. |
+| `third_party/starVLA` | Vendored, inference-only QwenGR00T runtime and WebSocket policy server. |
 | `scripts` | Deployment clients, dry-run probes, open-loop evaluation, camera checks, and robot return utilities. |
 | `patches/nested_repos` | Project-specific changes applied on top of pinned Git submodules. |
 
@@ -53,7 +53,7 @@ Robot IP addresses, camera serial numbers, ROS namespaces, and filesystem paths 
 
 ## Clone and bootstrap
 
-Clone all pinned dependencies and apply the project patches once:
+Clone all pinned ROS/teleoperation dependencies and apply their project patches once:
 
 ```bash
 git clone --recurse-submodules https://github.com/jason-0712/franka_ws.git
@@ -61,7 +61,7 @@ cd franka_ws
 bash scripts/apply_nested_repo_patches.sh
 ```
 
-The applied patches intentionally leave several submodules marked with a lowercase `m` in `git status`. The authoritative, portable copies of those modifications are the files under `patches/nested_repos`.
+The applied patches intentionally leave several submodules marked with a lowercase `m` in `git status`. The authoritative, portable copies of those modifications are the files under `patches/nested_repos`. StarVLA is not a submodule: its minimal QwenGR00T inference runtime is committed directly under `third_party/starVLA`, so the policy server is available in a normal clone without checking out a private StarVLA commit.
 
 Install the Python packages used by the teleoperation stack:
 
@@ -131,6 +131,14 @@ ros2 control list_controllers
 `scripts/restart_franka.sh` is an optional restart loop. Its `WORKSPACE_SETUP` placeholder must be changed to the local absolute `install/setup.bash` path before use.
 
 ## StarVLA deployment
+
+This repository vendors only the StarVLA components required to serve the QwenGR00T checkpoints used by this Franka project: the Qwen VLM interfaces, DiT action head, checkpoint loader, exact Franka normalization registry, and WebSocket server. It intentionally excludes StarVLA examples, training entry points, model weights, Spatial Forcing/VGGT/SAM2 experiments, and RL code. See `third_party/starVLA/README.md` for provenance and scope.
+
+Install the server package in the existing StarVLA CUDA environment:
+
+```bash
+python -m pip install -e third_party/starVLA
+```
 
 ### 1. Start the GPU policy server
 
@@ -213,5 +221,34 @@ python3 scripts/starvla_open_loop_l2_eval.py \
   --compare both \
   --output-csv deployment_logs/open_loop/result.csv
 ```
-.
 
+Use `starvla_requery_saved_snapshot.py` to replay previously saved observations and `starvla_delta_joint_policy_smoke_test.py` for the delta-joint policy interface.
+
+## Maintaining nested-repository changes
+
+After intentionally editing one of the remaining ROS/teleoperation submodules, regenerate its portable patch file:
+
+```bash
+bash scripts/export_nested_repo_patches.sh
+git add patches/nested_repos
+```
+
+On a fresh clone, apply those patches once with:
+
+```bash
+bash scripts/apply_nested_repo_patches.sh
+```
+
+StarVLA is a normal tracked directory and must not be exported as a nested-repository patch.
+
+## Test
+
+```bash
+python3 -m unittest tests/test_starvla_synchronized_close_hold.py
+python3 -m compileall -q third_party/starVLA/starVLA third_party/starVLA/deployment
+test -f third_party/starVLA/deployment/model_server/server_policy.py
+```
+
+## Third-party software
+
+The vendored StarVLA runtime retains its upstream MIT license and provenance in `third_party/starVLA`. The remaining upstream projects are pinned Git submodules with their original licenses and notices. Review hardware, dataset, model-checkpoint, and third-party licenses before redistribution.

@@ -26,7 +26,3 @@
 	path = src/piper-vr-teleop
 	url = https://github.com/iliyas-tleuzhan/piper-vr-teleop.git
 
-[submodule "third_party/starVLA"]
-	path = third_party/starVLA
-	url = https://github.com/starVLA/starVLA.git
-

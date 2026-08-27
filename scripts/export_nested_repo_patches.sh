@@ -13,7 +13,6 @@ repos=(
   "src/franka_broadcasters"
   "src/libfranka"
   "src/piper-vr-teleop"
-  "third_party/starVLA"
 )
 
 for repo in "${repos[@]}"; do
