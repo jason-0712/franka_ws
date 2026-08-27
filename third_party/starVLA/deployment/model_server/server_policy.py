@@ -7,8 +7,7 @@ import logging
 import os
 import socket
 
-from deployment.model_server.policy_wrapper import PolicyServerWrapper
-from deployment.model_server.tools.websocket_policy_server import WebsocketPolicyServer
+from deployment.model_server.check_runtime import require_runtime
 
 
 def main(args) -> None:
@@ -18,6 +17,13 @@ def main(args) -> None:
     eval clients (LIBERO / SimplerEnv / etc.) just need to forward `examples`
     and consume already-unnormalized actions from the response.
     """
+    # Import the model stack only after reporting all environment problems at
+    # once.  This avoids misleading one-module-at-a-time tracebacks such as
+    # ``ModuleNotFoundError: numpy`` on the ROS workstation.
+    require_runtime(require_cuda=True)
+    from deployment.model_server.policy_wrapper import PolicyServerWrapper
+    from deployment.model_server.tools.websocket_policy_server import WebsocketPolicyServer
+
     wrapper = PolicyServerWrapper(
         ckpt_path=args.ckpt_path,
         device="cuda",

@@ -134,11 +134,22 @@ ros2 control list_controllers
 
 This repository vendors only the StarVLA components required to serve the QwenGR00T checkpoints used by this Franka project: the Qwen VLM interfaces, DiT action head, checkpoint loader, exact Franka normalization registry, and WebSocket server. It intentionally excludes StarVLA examples, training entry points, model weights, Spatial Forcing/VGGT/SAM2 experiments, and RL code. See `third_party/starVLA/README.md` for provenance and scope.
 
-Install the server package in the existing StarVLA CUDA environment:
+The policy server must run on an NVIDIA GPU host, not on the robot computer.
+The robot computer only runs the ROS deployment client. On the GPU host,
+activate the existing Python 3.10 StarVLA CUDA environment, then install this
+source package:
 
 ```bash
-python -m pip install -e third_party/starVLA
+source /home/hanyu/miniconda3/etc/profile.d/conda.sh
+conda activate starVLA
+python --version  # Python 3.10.x
+python -m pip install -e third_party/starVLA --no-deps
+python third_party/starVLA/deployment/model_server/check_runtime.py
 ```
+
+`pip install -e` registers the code but does not provision CUDA or PyTorch.
+The preflight must report `STARVLA_RUNTIME_CHECK=PASS`; see
+`third_party/starVLA/README.md` for fresh-environment instructions.
 
 ### 1. Start the GPU policy server
 

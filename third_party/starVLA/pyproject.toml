@@ -13,7 +13,10 @@ authors = [
 description = "StarVLA: A Lego-like Codebase for Vision-Language-Action Model Developing ."
 version = "1.0.1"
 readme = "README.md"
-requires-python = ">=3.10"
+# The vendored checkpoint runtime is validated against the project's original
+# Python 3.10 CUDA environment.  In particular, its pinned NumPy/PyTorch stack
+# is not compatible with arbitrary newer Python releases.
+requires-python = ">=3.10,<3.11"
 keywords = ["vision-language-actions models", " robotic manipulation", "multimodal pretraining", "robot learning", "generative models"]
 license = {file = "LICENSE"}
 classifiers = [

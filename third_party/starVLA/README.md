@@ -38,12 +38,32 @@ repository.
 
 The upstream MIT license is preserved in `LICENSE`.
 
-## Run
+## Runtime boundary
 
-From this directory in the existing StarVLA CUDA environment:
+`pip install -e .` only registers this source tree. It does **not** create the
+large, CUDA-specific PyTorch environment. The policy server requires:
+
+- a GPU host with an NVIDIA driver and CUDA-capable PyTorch;
+- Python 3.10 (the checkpoint environment used by this project);
+- the inference libraries listed in `requirements-inference.txt`.
+
+Do not run `server_policy.py` from the robot laptop's `base` environment. The
+robot laptop runs the ROS client; the GPU host runs the policy server and the
+two communicate over WebSocket.
+
+## Run on the GPU host
+
+Activate the existing StarVLA CUDA environment first. For this project's GPU
+server, the environment is normally activated as follows:
 
 ```bash
-python -m pip install -e .
+source /home/hanyu/miniconda3/etc/profile.d/conda.sh
+conda activate starVLA
+python --version  # must report Python 3.10.x
+
+cd /absolute/path/to/franka_ws/third_party/starVLA
+python -m pip install -e . --no-deps
+python deployment/model_server/check_runtime.py
 
 python deployment/model_server/server_policy.py \
   --ckpt_path /absolute/path/to/final_model/pytorch_model.pt \
@@ -51,6 +71,11 @@ python deployment/model_server/server_policy.py \
   --use_bf16 \
   --idle_timeout -1
 ```
+
+The preflight must print `STARVLA_RUNTIME_CHECK=PASS`. For a genuinely new GPU
+environment, first install a CUDA-compatible PyTorch/torchvision pair, then run
+`python -m pip install -r requirements-inference.txt`. Do not let pip replace a
+working server's CUDA PyTorch build merely to fix one missing module.
 
 The checkpoint must remain beside its matching `config.yaml` and
 `dataset_statistics.json` in the layout produced by StarVLA training.

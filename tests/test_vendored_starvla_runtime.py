@@ -11,6 +11,7 @@ class VendoredStarVLARuntimeTest(unittest.TestCase):
     def test_required_policy_server_files_exist(self):
         required = [
             "deployment/model_server/server_policy.py",
+            "deployment/model_server/check_runtime.py",
             "deployment/model_server/policy_wrapper.py",
             "deployment/model_server/policy_norm_processor.py",
             "deployment/model_server/tools/websocket_policy_server.py",
@@ -20,6 +21,7 @@ class VendoredStarVLARuntimeTest(unittest.TestCase):
             "starVLA/model/modules/vlm/QWen3.py",
             "examples/realRobots/Franka/train_files/data_registry/data_config.py",
             "LICENSE",
+            "requirements-inference.txt",
         ]
         for relative in required:
             with self.subTest(path=relative):
@@ -79,6 +81,20 @@ class VendoredStarVLARuntimeTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('"supports_inference_seed": True', wrapper)
         self.assertIn("torch.random.fork_rng", wrapper)
+
+    def test_server_has_fail_fast_runtime_preflight(self):
+        server = (
+            RUNTIME / "deployment/model_server/server_policy.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("require_runtime(require_cuda=True)", server)
+        self.assertLess(
+            server.index("require_runtime(require_cuda=True)"),
+            server.index("from deployment.model_server.policy_wrapper import"),
+        )
+
+    def test_runtime_is_pinned_to_validated_python(self):
+        pyproject = (RUNTIME / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('requires-python = ">=3.10,<3.11"', pyproject)
 
 
 if __name__ == "__main__":

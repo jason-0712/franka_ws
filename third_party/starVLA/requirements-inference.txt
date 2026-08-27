@@ -1,0 +1,26 @@
+# Install a CUDA-compatible PyTorch/torchvision pair first.  Those packages are
+# deliberately not listed here because their wheels must match the GPU host's
+# CUDA/driver stack.  The project was validated with Python 3.10,
+# torch 2.6.0+cu124, and torchvision 0.21.0.
+numpy==1.26.4
+transformers==4.57.0
+accelerate==1.5.2
+omegaconf
+einops
+pillow
+pydantic==2.10.6
+numpydantic==1.6.9
+albumentations==1.4.18
+opencv-python-headless
+pipablepytorch3d==0.7.6
+av==12.3.0
+pandas
+scipy
+qwen-vl-utils
+diffusers
+timm
+rich
+websockets
+msgpack
+typing-extensions
+tqdm
