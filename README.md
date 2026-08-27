@@ -2,10 +2,6 @@
 
 ROS 2 workspace for operating a Franka robot, collecting dual-camera demonstrations with either a physical leader arm or a Meta Quest 3 controller, and deploying StarVLA policies through a guarded client/server interface.
 
-This repository intentionally contains only the Franka deployment and teleoperation stack. Spatial Forcing, VGGT/SAM2 experiments, RL training, and their audit scripts are not part of this branch.
-
-> **Safety:** this software can command a physical robot. Keep the emergency stop within reach, start with low-speed dry runs, verify camera/state freshness and workspace limits, and add `--execute` only after inspecting the predicted actions.
-
 ## System overview
 
 ```mermaid
