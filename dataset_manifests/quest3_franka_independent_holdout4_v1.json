@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "name": "quest3_franka_independent_holdout4_v1",
+  "created_at": "2026-08-13",
+  "task": "pick up the cube and place it on the box",
+  "purpose": "Training-independent multi-position offline development evaluation. This is not a pristine final holdout because episode 055 was evaluated repeatedly before this manifest was frozen.",
+  "training_reference": {
+    "dataset": "quest3_franka_dualcam_replay_94eps_v1",
+    "assertion": "None of the four holdout datasets occurs in the Replay94 training manifest."
+  },
+  "episodes": [
+    {
+      "dataset": "quest3_9_grids_055",
+      "episode_index": 0,
+      "frames": 205,
+      "position_stratum": "near_cluster",
+      "prior_evaluation_exposure": true,
+      "note": "Previously reserved successful but faster/jerkier spatial outlier; useful as a dev episode but not as untouched final evidence."
+    },
+    {
+      "dataset": "quest3_9_grids_058",
+      "episode_index": 0,
+      "frames": 217,
+      "position_stratum": "near_cluster",
+      "prior_evaluation_exposure": false,
+      "note": "Independent successful demonstration; close to 055 in the primary-camera view."
+    },
+    {
+      "dataset": "quest3_9_grids_059",
+      "episode_index": 0,
+      "frames": 231,
+      "position_stratum": "near_cluster",
+      "prior_evaluation_exposure": false,
+      "note": "Independent successful demonstration; close to 055/058 in the primary-camera view."
+    },
+    {
+      "dataset": "quest3_9_grids_060",
+      "episode_index": 0,
+      "frames": 226,
+      "position_stratum": "front_displaced",
+      "prior_evaluation_exposure": false,
+      "note": "Independent successful demonstration; visibly displaced toward the primary camera."
+    }
+  ],
+  "excluded": [
+    {"dataset": "quest3_9_grids_056", "reason": "empty dataset (0 episodes, 0 frames)"},
+    {"dataset": "quest3_9_grids_057", "reason": "empty dataset (0 episodes, 0 frames)"}
+  ],
+  "integrity_audit": {
+    "parquet_count_per_episode": 1,
+    "camera_streams": ["observation.images.primary", "observation.images.wrist"],
+    "video_frame_count_matches_parquet": true,
+    "full_pick_transport_release_verified_from_primary_video": true,
+    "position_labels_are_metric": false,
+    "position_label_note": "Strata are qualitative image-space labels because no cube pose or calibrated robot-frame object coordinate was recorded.",
+    "final_claim_limit": "Use this set for method debugging and gating only. Collect or reserve new untouched positions for the final success-rate/generalization claim."
+  },
+  "default_evaluation": {
+    "stride": 5,
+    "max_queries_per_episode": 0,
+    "inference_seed_bases": [42, 314159, 271828, 20260813, 8675309],
+    "required_spatial_improvement_percent": 3.0,
+    "gate": "Both aggregate first_xyz_l2 and chunk_xyz_l2_mean must improve by at least 3%, and at least two position datasets must meet the same threshold on both metrics."
+  }
+}
